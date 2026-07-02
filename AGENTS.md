@@ -245,6 +245,17 @@ The `/v1/embeddings` endpoint in `api.py`:
 
 ---
 
+## Project Skills
+
+Recurring development workflows are codified as project-level skills in `.agents/skills/<name>/SKILL.md`. Load one with the `skill` tool when the task matches.
+
+| Skill | When to load |
+|-------|-------------|
+| `rust-ffi-bind` | Adding new llama.cpp C API functions through Rust FFI → PyO3 |
+| `ollama-registry-pull` | Working with Ollama's OCI registry (pull, protocol quirks, SHA-256 verification) |
+
+If you encounter a new recurring workflow during development, write it as a skill in `.agents/skills/<name>/SKILL.md` so future agent sessions can reuse the pattern.
+
 ## Cross-Session Context Tips
 
 - The `engines.py` `EngineConfig` class with Jinja2 templating is the **extension mechanism** for custom engines — this is the plugin system
