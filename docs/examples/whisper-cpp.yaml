@@ -1,0 +1,13 @@
+name: whisper-cpp
+type: stt
+binary: /usr/local/bin/whisper-cli
+args_template: >
+  {{ binary }} -m {{ model_path }} -f {{ prompt }} -otxt
+  -t {{ threads }}
+  {% if output %}--output-file {{ output }}{% endif %}
+env: {}
+pre_check: "{{ binary }} --version 2>&1 | head -1"
+supports_streaming: false
+model_extensions:
+  - .ggml
+  - .bin

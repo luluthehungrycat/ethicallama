@@ -1,66 +1,111 @@
+// ethllama-core/src/lib.rs
+//
+// Python bindings (via PyO3) to the llama.cpp FFI layer.
+// Provides a PyLlamaModel class that loads a GGUF model and runs inference.
+
+mod llama;
+mod utils;
+
 use pyo3::prelude::*;
-use std::ffi::CString;
-use std::os::raw::c_char;
 
-// Declare external functions from llama.cpp
-extern "C" {
-    fn llama_model_load(path: *const c_char, params: *const LlamaModelParams) -> *mut LlamaModel;
-    fn llama_free(model: *mut LlamaModel);
-    fn llama_eval(model: *mut LlamaModel, tokens: *const i32, n_tokens: i32, n_threads: i32) -> i32;
-    fn llama_decode(model: *mut LlamaModel, tokens: *mut i32, n_tokens: i32, n_threads: i32) -> i32;
-}
+// ---------------------------------------------------------------------------
+// Python‑exposed class that wraps raw llama model + context pointers.
+// ---------------------------------------------------------------------------
 
-// Opaque type for LlamaModel (defined in llama.cpp)
-#[repr(C)]
-pub struct LlamaModel;
-
-// Parameters for model loading
-#[repr(C)]
-pub struct LlamaModelParams {
-    pub n_gpu_layers: i32,
-    pub use_mmap: bool,
-    pub vocab_only: bool,
-    // Add other params as needed
-}
-
+/// A Python‑accessible wrapper around a loaded llama.cpp model.
 #[pyclass]
-struct PyLlamaModel {
-    model_ptr: *mut LlamaModel,
+pub struct PyLlamaModel {
+    model_ptr: *mut llama::llama_model,
+    ctx_ptr: *mut llama::llama_context,
 }
+
+unsafe impl Send for PyLlamaModel {}
 
 #[pymethods]
 impl PyLlamaModel {
+    /// Load a model from the given file path.
+    ///
+    /// Args:
+    ///     path: Path to a GGUF model file.
+    ///     n_gpu_layers: Number of layers to offload to GPU (0 = CPU only).
+    ///     n_ctx: Context size in tokens.
+    ///     n_threads: Number of CPU threads to use.
     #[new]
-    fn new(path: String, n_gpu_layers: i32) -> PyResult<Self> {
-        let c_path = CString::new(path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let params = LlamaModelParams {
-            n_gpu_layers,
-            use_mmap: true,
-            vocab_only: false,
-        };
-        let model_ptr = unsafe { llama_model_load(c_path.as_ptr(), &params) };
-        if model_ptr.is_null() {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to load model"))
-        } else {
-            Ok(Self { model_ptr })
-        }
+    fn new(
+        path: String,
+        n_gpu_layers: i32,
+        n_ctx: u32,
+        n_threads: i32,
+    ) -> PyResult<Self> {
+        // Initialize the llama backend once
+        unsafe { llama::llama_backend_init() };
+
+        let (model_ptr, ctx_ptr) =
+            llama::load_model(&path, n_gpu_layers, n_ctx, n_threads).map_err(|e| {
+                unsafe { llama::llama_backend_free() };
+                pyo3::exceptions::PyRuntimeError::new_err(e)
+            })?;
+
+        Ok(Self { model_ptr, ctx_ptr })
     }
 
-    fn infer(&self, prompt: String, n_threads: i32) -> PyResult<String> {
-        // Simplified: Tokenize prompt, call llama_eval, then decode
-        // In practice, you'd need to implement tokenization/detokenization
-        // or use llama.cpp's built-in functions for this.
-        unsafe {
-            // Placeholder: Replace with actual inference logic
-            let output = format!("Inferred from: {}", prompt);
-            Ok(output)
-        }
+    /// Run inference on a prompt.
+    ///
+    /// Args:
+    ///     prompt: Input text to complete.
+    ///     max_tokens: Maximum number of tokens to generate.
+    ///     temperature: Sampling temperature (0 = greedy, >0 = stochastic).
+    ///     top_p: Nucleus sampling threshold (0 = disabled).
+    ///     top_k: Top‑K sampling (0 = disabled).
+    ///
+    /// Returns:
+    ///     Generated text as a string.
+    fn infer(
+        &self,
+        prompt: String,
+        max_tokens: i32,
+        temperature: f32,
+        top_p: f32,
+        top_k: i32,
+    ) -> PyResult<String> {
+        let result = llama::infer_tokens(
+            self.ctx_ptr,
+            self.model_ptr,
+            &prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        Ok(result)
     }
 
-    fn __del__(&mut self) {
-        unsafe { llama_free(self.model_ptr) };
+    /// Return detected GPU backends as a JSON string.
+    fn gpu_info(&self) -> PyResult<String> {
+        let backends = utils::detect_gpu_backends();
+        serde_json::to_string(&backends)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }
+
+impl Drop for PyLlamaModel {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.ctx_ptr.is_null() {
+                llama::llama_free(self.ctx_ptr);
+            }
+            if !self.model_ptr.is_null() {
+                llama::llama_model_free(self.model_ptr);
+            }
+            llama::llama_backend_free();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PyO3 module definition
+// ---------------------------------------------------------------------------
 
 #[pymodule]
 fn ethllama_core(_py: Python, m: &PyModule) -> PyResult<()> {

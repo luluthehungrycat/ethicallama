@@ -1,0 +1,18 @@
+name: llama-cpp
+type: text
+binary: /usr/local/bin/llama-cli
+args_template: >
+  {{ binary }} -m {{ model_path }} -p "{{ prompt }}"
+  {% if temperature %}--temp {{ temperature }}{% endif %}
+  {% if top_p %}--top-p {{ top_p }}{% endif %}
+  {% if top_k %}--top-k {{ top_k }}{% endif %}
+  -t {{ threads }}
+  {% if n_gpu_layers > 0 %}-ngl {{ n_gpu_layers }}{% endif %}
+  {% if output %}--file {{ output }}{% endif %}
+env:
+  GGML_CUDA_ENABLE_UNIFIED_MEMORY: "1"
+pre_check: "{{ binary }} --version"
+supports_streaming: true
+model_extensions:
+  - .gguf
+  - .bin
