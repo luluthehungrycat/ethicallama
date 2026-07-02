@@ -247,12 +247,12 @@ The `/v1/embeddings` endpoint in `api.py`:
 
 ## Project Skills
 
-Recurring development workflows are codified as project-level skills in `.agents/skills/<name>/SKILL.md`. Load one with the `skill` tool when the task matches.
+**Before every non-trivial implementation task, check `.agents/skills/` for a matching skill and load it with the `skill` tool.** Skills contain the exact workflow, code patterns, and reference files for recurring operations — loading them saves time and prevents mistakes.
 
-| Skill | When to load |
+| Skill | Load when... |
 |-------|-------------|
-| `rust-ffi-bind` | Adding new llama.cpp C API functions through Rust FFI → PyO3 |
-| `ollama-registry-pull` | Working with Ollama's OCI registry (pull, protocol quirks, SHA-256 verification) |
+| `rust-ffi-bind` | Adding new llama.cpp C API functions through Rust FFI → PyO3 (three-layer pattern: extern "C" → safe wrapper → pyclass) |
+| `ollama-registry-pull` | Working with Ollama's OCI registry (pull, protocol quirks, SHA-256 verification, Content-Type bug, 307 redirects) |
 
 If you encounter a new recurring workflow during development, write it as a skill in `.agents/skills/<name>/SKILL.md` so future agent sessions can reuse the pattern.
 
