@@ -256,6 +256,8 @@ The `/v1/embeddings` endpoint in `api.py`:
 
 If you encounter a new recurring workflow during development, write it as a skill in `.agents/skills/<name>/SKILL.md` so future agent sessions can reuse the pattern.
 
+**Skills are living documents.** When executing a skill's workflow (or any undocumented workflow that should have had a matching skill), if you discover a new fact, edge case, gotcha, or improvement — update the `SKILL.md` to capture it. Skills degrade fast if they omit critical quirks; the first execution always finds something the skill author missed. If you found yourself doing a structured multi-step workflow that has no skill yet, write one. Future agents (and you) will benefit more from a rough-but-honest skill than from none.
+
 ## Cross-Session Context Tips
 
 - The `engines.py` `EngineConfig` class with Jinja2 templating is the **extension mechanism** for custom engines — this is the plugin system
