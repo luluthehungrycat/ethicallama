@@ -8,6 +8,7 @@ tokenizer bug is resolved for the given model.
 
 import json
 import re
+import struct
 import shutil
 import subprocess
 from pathlib import Path
@@ -434,14 +435,250 @@ class RustInferenceEngine:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def format_chat_messages(messages: list) -> str:
-    """Format a list of {role, content} dicts into a prompt string.
+# ---------------------------------------------------------------------------
+# Chat template extraction (from GGUF v3 metadata)
+# ---------------------------------------------------------------------------
 
-    Uses a simple role-header format compatible with most instruct-tuned
-    models.  For production use, replace with the model's
-    ``tokenizer.chat_template`` from GGUF metadata.
+_CHAT_TEMPLATE_KEY = "tokenizer.chat_template"
+_GGUF_MAGIC = b"GGUF"
+_GGUF_SUPPORTED_VERSION = 3
+
+# Safety caps so a malformed GGUF file cannot trick the parser into
+# reading or allocating gigabytes of data.
+_MAX_HEADER_BYTES = 4 * 1024 * 1024        # 4 MiB of metadata to scan
+_MAX_KEY_BYTES = 4096                       # GGUF keys are short identifiers
+_MAX_STRING_VALUE_BYTES = 16 * 1024 * 1024  # 16 MiB; any chat template is <1 MiB
+_MAX_KV_COUNT = 100_000                     # reasonable upper bound for sanity
+
+# GGUF value types (matches llama.cpp gguf.h)
+_GGUF_TYPE_STRING = 8
+_GGUF_TYPE_ARRAY = 9
+
+# Match a simple Mustache / Go-template variable reference like
+# ``{{ .Prompt }}`` or ``{{- .Prompt -}}`` and capture the bare
+# identifier.  Nested paths (``.Foo.Bar``) and control structures
+# (``range``, ``if``, ``end``) are intentionally not handled — chat
+# templates that need them will simply have those tokens left in the
+# output, which is a graceful degradation rather than a crash.
+_CHAT_VAR_RE = re.compile(r"\{\{\s*-?\s*\.(\w+)\s*-?\s*\}\}")
+
+
+def read_chat_template(model_path: str) -> Optional[str]:
+    """Extract the ``tokenizer.chat_template`` string from a GGUF v3 file.
+
+    The chat template (used by llama.cpp, transformers, etc. to render
+    multi-turn conversations) is stored as a metadata KV pair under the
+    key ``tokenizer.chat_template``.  This function parses only the
+    GGUF header and stops as soon as the key is found, so it works on
+    multi-GB model files without loading them into memory.
+
+    The parser handles GGUF v3 only — older versions use a different
+    on-disk layout and will be rejected.  Any parse error, missing
+    key, or absent value returns :data:`None` rather than raising.
+
+    Args:
+        model_path: Path to a GGUF model file.
+
+    Returns:
+        The chat template string, or :data:`None` if the key is
+        missing, the file is malformed, or a different GGUF version
+        is used.
     """
-    parts: list[str] = []
+    try:
+        with open(model_path, "rb") as f:
+            # Header: magic(4) + version(4) + tensor_count(8) + kv_count(8) = 24
+            head = f.read(24)
+            if len(head) < 24:
+                return None
+            if head[:4] != _GGUF_MAGIC:
+                return None
+            version, _tensor_count, kv_count = struct.unpack(
+                "<IQQ", head[4:24]
+            )
+            if version != _GGUF_SUPPORTED_VERSION:
+                return None
+            if kv_count > _MAX_KV_COUNT:
+                return None
+
+            for _ in range(kv_count):
+                if f.tell() > _MAX_HEADER_BYTES:
+                    return None
+
+                # --- key (length-prefixed UTF-8 string) -----------------
+                key_len_bytes = f.read(8)
+                if len(key_len_bytes) < 8:
+                    return None
+                key_len = struct.unpack("<Q", key_len_bytes)[0]
+                if key_len > _MAX_KEY_BYTES:
+                    # Pathological key — skip it and its value.
+                    f.seek(key_len, 1)
+                    type_bytes = f.read(4)
+                    if len(type_bytes) < 4:
+                        return None
+                    value_type = struct.unpack("<I", type_bytes)[0]
+                    _skip_gguf_value(f, value_type)
+                    continue
+                key_bytes = f.read(key_len)
+                if len(key_bytes) < key_len:
+                    return None
+                key = key_bytes.decode("utf-8", errors="replace")
+
+                # --- value type -----------------------------------------
+                type_bytes = f.read(4)
+                if len(type_bytes) < 4:
+                    return None
+                value_type = struct.unpack("<I", type_bytes)[0]
+
+                if key == _CHAT_TEMPLATE_KEY and value_type == _GGUF_TYPE_STRING:
+                    str_len_bytes = f.read(8)
+                    if len(str_len_bytes) < 8:
+                        return None
+                    str_len = struct.unpack("<Q", str_len_bytes)[0]
+                    if str_len > _MAX_STRING_VALUE_BYTES:
+                        return None
+                    val_bytes = f.read(str_len)
+                    if len(val_bytes) < str_len:
+                        return None
+                    return val_bytes.decode("utf-8", errors="replace")
+
+                _skip_gguf_value(f, value_type)
+    except (OSError, struct.error, UnicodeDecodeError, ValueError):
+        return None
+    return None
+
+
+# Fixed size (in bytes) for each GGUF primitive value type, used when
+# skipping an array of primitives.  Variable-sized types (string, array)
+# are not in this table and will cause a parse error if encountered.
+_GGUF_PRIMITIVE_SIZES = {
+    0: 1, 1: 1,                       # uint8, int8
+    2: 2, 3: 2,                       # uint16, int16
+    4: 4, 5: 4, 6: 4,                 # uint32, int32, float32
+    7: 1,                             # bool
+    10: 8, 11: 8, 12: 8,              # uint64, int64, float64
+}
+
+
+def _skip_gguf_value(f, value_type: int) -> None:
+    """Skip over a GGUF metadata value of ``value_type``.
+
+    Uses :func:`file.seek` so the underlying bytes are not read into
+    memory.  Raises :class:`struct.error` on a truncated value so the
+    outer ``read_chat_template`` can convert it to :data:`None`.
+    """
+    if value_type in (0, 1, 7):  # uint8, int8, bool
+        f.seek(1, 1)
+    elif value_type in (2, 3):  # uint16, int16
+        f.seek(2, 1)
+    elif value_type in (4, 5, 6):  # uint32, int32, float32
+        f.seek(4, 1)
+    elif value_type == _GGUF_TYPE_STRING:  # string
+        length_bytes = f.read(8)
+        if len(length_bytes) < 8:
+            raise struct.error("truncated string length")
+        length = struct.unpack("<Q", length_bytes)[0]
+        f.seek(length, 1)
+    elif value_type == _GGUF_TYPE_ARRAY:  # array
+        header = f.read(12)
+        if len(header) < 12:
+            raise struct.error("truncated array header")
+        element_type, count = struct.unpack("<IQ", header)
+        elem_size = _GGUF_PRIMITIVE_SIZES.get(element_type)
+        if elem_size is None:
+            # Variable-size elements (e.g. strings inside an array)
+            # are not worth handling here — bail and let the outer
+            # try/except turn it into a graceful None.
+            raise struct.error(
+                f"unsupported array element type {element_type}"
+            )
+        f.seek(count * elem_size, 1)
+    elif value_type in (10, 11, 12):  # uint64, int64, float64
+        f.seek(8, 1)
+    else:
+        raise struct.error(f"unknown GGUF value type {value_type}")
+
+
+def _render_chat_template(template: str, messages: list) -> str:
+    """Render a simple Go-template / Mustache chat template.
+
+    Supports ``{{ .Prompt }}``, ``{{ .System }}``, ``{{ .Response }}``,
+    ``{{ .Content }}`` (alias of ``.Prompt``), and ``{{ .Role }}``.
+    Any other ``{{ .VarName }}`` placeholder — including unknown
+    identifiers like ``.Tools`` or ``.Stop`` — is replaced with an
+    empty string.  Nested paths (``.Foo.Bar``) and control structures
+    (``{{ range ... }}``, ``{{ if ... }}``) are left untouched in the
+    output as a graceful degradation; the spec only requires basic
+    Mustache substitution.
+
+    If the template references ``{{ .Role }}`` it is applied per
+    message in order (so each turn becomes one block of the template).
+    Otherwise it is applied once to the full conversation using the
+    first system message, the last user message, and the last
+    assistant message.
+    """
+    uses_role = ("{{ .Role }}" in template) or ("{{.Role}}" in template)
+
+    if uses_role:
+        out_parts: List[str] = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            out_parts.append(
+                _CHAT_VAR_RE.sub(
+                    lambda m, r=role, c=content: {
+                        "Role": r,
+                        "Prompt": c,
+                        "Content": c,
+                        "System": "",
+                        "Response": "",
+                    }.get(m.group(1), ""),
+                    template,
+                )
+            )
+        return "".join(out_parts)
+
+    system_text = ""
+    for m in messages:
+        if m.get("role") == "system":
+            system_text = m.get("content", "")
+            break
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+    prompt_text = user_msgs[-1].get("content", "") if user_msgs else ""
+    response_text = (
+        assistant_msgs[-1].get("content", "") if assistant_msgs else ""
+    )
+
+    return _CHAT_VAR_RE.sub(
+        lambda m: {
+            "Prompt": prompt_text,
+            "Content": prompt_text,
+            "System": system_text,
+            "Response": response_text,
+        }.get(m.group(1), ""),
+        template,
+    )
+
+
+def format_chat_messages(
+    messages: list,
+    model_path: Optional[str] = None,
+) -> str:
+    """Format a list of ``{role, content}`` dicts into a prompt string.
+
+    If ``model_path`` is given and the GGUF file contains a
+    ``tokenizer.chat_template`` metadata entry, that template is used
+    (with ``{{ .Prompt }}`` / ``{{ .System }}`` / ``{{ .Response }}``
+    placeholders substituted in).  Otherwise this falls back to a
+    hardcoded ``<|im_start|>`` role-header format compatible with
+    most instruct-tuned models.
+    """
+    if model_path is not None:
+        template = read_chat_template(model_path)
+        if template:
+            return _render_chat_template(template, messages)
+
+    parts: List[str] = []
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")

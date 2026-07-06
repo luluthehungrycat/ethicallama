@@ -778,10 +778,28 @@ def config(do_init: bool):
 @click.option("--n-gpu-layers", default=0, show_default=True, type=int, help="Layers to offload to GPU")
 @click.option("--gpu-backend", default="auto", show_default=True, type=str, help="GPU backend (vulkan, rocm, cuda, auto)")
 @click.option("--threads", default=4, show_default=True, type=int, help="CPU thread count")
-def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str, threads: int):
-    """Start the HTTP API server (FastAPI, opt-in)."""
+@click.option("--model", "-m", default=None, type=str,
+              help="Model identifier or path to pre-load at server startup")
+def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str,
+          threads: int, model: Optional[str]):
+    """Start the HTTP API server (FastAPI, opt-in).
+
+    MODEL is an optional model identifier or path to pre-load at startup.
+    """
     from .inference import set_gpu_config
     set_gpu_config(n_gpu_layers=n_gpu_layers, gpu_backend=gpu_backend, n_threads=threads)
+
+    # Resolve preloaded model: try the index first, then a direct path
+    preloaded_model: Optional[str] = None
+    if model:
+        preloaded_model = resolve_model_path(model)
+        if not preloaded_model:
+            if os.path.exists(model):
+                preloaded_model = os.path.abspath(model)
+            else:
+                click.echo(f"Warning: Model '{model}' not found in index and is not a valid path.", err=True)
+                click.echo("The server will start without a pre-loaded model.", err=True)
+                preloaded_model = None
 
     try:
         from .api import run_server
@@ -793,9 +811,11 @@ def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: st
     click.echo(f"Starting ethicallama API on http://{host}:{port}")
     if api_key:
         click.echo("API key authentication enabled")
+    if preloaded_model:
+        click.echo(f"Pre-loaded model: {preloaded_model}")
     click.echo("Press Ctrl+C to stop")
     try:
-        run_server(host=host, port=port, api_key=api_key)
+        run_server(host=host, port=port, api_key=api_key, model_path=preloaded_model)
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")
 

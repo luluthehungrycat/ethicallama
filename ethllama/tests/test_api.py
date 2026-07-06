@@ -299,3 +299,106 @@ def test_invalid_json_request(test_client):
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 422
+
+
+
+# ---------------------------------------------------------------------------
+# Preloaded model (serve --model)
+# ---------------------------------------------------------------------------
+
+
+def test_run_server_accepts_model_path_kwarg():
+    """``run_server`` declares ``model_path`` as a keyword argument."""
+    import inspect
+    sig = inspect.signature(api.run_server)
+    assert "model_path" in sig.parameters
+    # Default value should be None so existing call sites keep working
+    assert sig.parameters["model_path"].default is None
+
+
+def test_preloaded_model_appears_in_models_list(tmp_path, tmp_ethllama_home, monkeypatch):
+    """``GET /v1/models`` includes a preloaded model even when it isn't indexed."""
+    # Create a real file on disk so stat() works
+    preloaded_path = tmp_path / "preloaded.gguf"
+    preloaded_path.write_bytes(b"GGUF" + b"\x00" * 64)
+
+    # No model is in the index, but one is preloaded via app.state
+    monkeypatch.setattr(api.app.state, "preloaded_model", str(preloaded_path), raising=False)
+
+    client = TestClient(api.app)
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    ids = [m["id"] for m in body["data"]]
+    assert "preloaded" in ids
+    preloaded_entry = next(m for m in body["data"] if m["id"] == "preloaded")
+    assert preloaded_entry["object"] == "model"
+    assert preloaded_entry["root"] == str(preloaded_path)
+    # It should be inserted at the front (most prominent)
+    assert body["data"][0]["id"] == "preloaded"
+
+
+def test_preloaded_model_not_duplicated_when_already_indexed(indexed_model, tmp_ethllama_home, monkeypatch):
+    """If the preloaded model is also in the index, ``/v1/models`` does not duplicate it."""
+    filename, path = indexed_model
+    monkeypatch.setattr(api.app.state, "preloaded_model", path, raising=False)
+
+    client = TestClient(api.app)
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    ids = [m["id"] for m in body["data"]]
+    assert ids.count(filename) == 1
+
+
+def test_chat_completion_uses_preloaded_model_by_basename(tmp_path, tmp_ethllama_home,
+                                                          mock_inference, mock_embeddings,
+                                                          monkeypatch):
+    """A chat request referencing the preloaded model by stem resolves to the preloaded path."""
+    preloaded_path = tmp_path / "my-preloaded-model.gguf"
+    preloaded_path.write_bytes(b"GGUF" + b"\x00" * 64)
+    monkeypatch.setattr(api.app.state, "preloaded_model", str(preloaded_path), raising=False)
+
+    client = TestClient(api.app)
+    # Reference the preloaded model by its stem
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "my-preloaded-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "my-preloaded-model"
+
+
+def test_chat_completion_uses_preloaded_model_by_full_path(tmp_path, tmp_ethllama_home,
+                                                           mock_inference, mock_embeddings,
+                                                           monkeypatch):
+    """A chat request referencing the preloaded model by absolute path works."""
+    preloaded_path = tmp_path / "another-preloaded.gguf"
+    preloaded_path.write_bytes(b"GGUF" + b"\x00" * 64)
+    monkeypatch.setattr(api.app.state, "preloaded_model", str(preloaded_path), raising=False)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": str(preloaded_path), "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+
+
+def test_chat_completion_unknown_model_returns_404(test_client, indexed_model):
+    """Without a preloaded model, an unknown model name still returns 404."""
+    response = test_client.post(
+        "/v1/chat/completions",
+        json={"model": "definitely-not-indexed", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_no_preloaded_model_means_state_attr_is_none(test_client, monkeypatch):
+    """Without ``serve --model``, ``app.state.preloaded_model`` is unset/None."""
+    # Reset state so this test is order-independent
+    monkeypatch.setattr(api.app.state, "preloaded_model", None, raising=False)
+    preloaded = getattr(api.app.state, "preloaded_model", None)
+    assert preloaded is None

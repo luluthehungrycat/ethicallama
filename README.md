@@ -1,9 +1,8 @@
 # ethicallama
 
-<!-- TODO: replace `your-org` with the actual GitHub owner once the repo is created. -->
-[![CI](https://github.com/your-org/ethicallama/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/ethicallama/actions/workflows/ci.yml)
+[![CI](https://github.com/luluthehungrycat/ethicallama/actions/workflows/ci.yml/badge.svg)](https://github.com/luluthehungrycat/ethicallama/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ethicallama)](https://pypi.org/project/ethicallama/)
-[![License](https://img.shields.io/github/license/your-org/ethicallama)](LICENSE)
+[![License](https://img.shields.io/github/license/luluthehungrycat/ethicallama)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/ethicallama)](https://pypi.org/project/ethicallama/)
 
 A local-first, privacy-respecting LLM inference wrapper for running large language models entirely on your own hardware.
@@ -27,17 +26,92 @@ A local-first, privacy-respecting LLM inference wrapper for running large langua
 
 ### Installation
 
+Pick the install method that matches your workflow. `ethicallama` is
+local-only: nothing is sent to the network and no telemetry runs unless
+you explicitly enable it.
+
+#### Using pip (recommended, once on PyPI)
+
+The standard, works-everywhere install. Wheels are pre-built for Linux
+and macOS on Python 3.10+.
+
 ```bash
-# Clone the repository
-git clone https://github.com/luluthehungrycat/ethicallama.git
+pip install ethicallama
+
+# With API server support:
+pip install "ethicallama[api]"
+
+# With everything (API, HF pulling, Safetensors conversion):
+pip install "ethicallama[all]"
+```
+
+#### Using uv (10-100× faster than pip)
+
+[uv](https://docs.astral.sh/uv/) is a Rust-based Python package
+manager — drop-in faster `pip`. Use it inside an existing virtualenv
+or for one-off `pip`-style installs.
+
+```bash
+# Inside a uv-managed venv
+uv pip install ethicallama
+uv pip install "ethicallama[api]"
+
+# Run without permanently installing (one-shot)
+uv run --with ethicallama ethllama run llama3.2
+```
+
+#### Using pipx (isolated CLI, no venv management)
+
+[pipx](https://pipx.pypa.io/) installs Python CLI tools in their own
+isolated virtualenv and exposes the `ethllama` executable on your
+`PATH` globally — ideal if you just want the CLI on your machine.
+
+```bash
+pipx install ethicallama
+
+# With API server support:
+pipx install "ethicallama[api]"
+
+# Upgrade later:
+pipx upgrade ethicallama
+```
+
+#### From source (latest code, full Rust core)
+
+For the latest unreleased code, custom Rust core builds, or
+contributing to the project:
+
+```bash
+git clone --recursive https://github.com/luluthehungrycat/ethicallama
 cd ethicallama
 
-# Run the setup script
-bash scripts/setup.sh
+# Set up a venv (uv or stdlib venv both work)
+uv venv && source .venv/bin/activate
+# (or:  python3 -m venv .venv && source .venv/bin/activate)
 
-# Initialize configuration
+uv pip install maturin ".[all]"
+# (or:  pip install maturin ".[all]")
+
+# Build the Rust extension and install the Python package
+maturin develop --release
+```
+
+After installing, initialize the user config:
+
+```bash
 ethllama config --init
 ```
+
+### Optional extras
+
+| Extra       | Adds                                                        |
+|-------------|-------------------------------------------------------------|
+| `[api]`     | FastAPI server (`ethllama serve`) + uvicorn + pydantic      |
+| `[pull]`    | HuggingFace Hub model pulling (`ethllama pull`)             |
+| `[convert]` | Safetensors → GGUF conversion (`ethllama convert`)           |
+| `[all]`     | All of the above                                            |
+
+Extras are stacked with commas, e.g. `pip install "ethicallama[api,pull]"`.
 
 ### Basic Usage
 
@@ -257,6 +331,10 @@ pytest
 # Run Rust tests
 cargo test -p ethllama-core
 ```
+
+> **Using uv?** The entire project works seamlessly with `uv` — see
+> [AGENTS.md](AGENTS.md) for the full uv development workflow (venv
+> creation, maturin builds, and the recommended test commands).
 
 ## Credits
 

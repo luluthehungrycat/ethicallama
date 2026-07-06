@@ -4,25 +4,99 @@ ethicallama is a local-first LLM inference wrapper with support for multiple bac
 
 ## Installation
 
-### From Source
+Pick the install method that matches your workflow. `ethicallama` is
+local-only: nothing is sent to the network and no telemetry runs unless
+you explicitly enable it.
+
+### Via pip (when on PyPI)
+
+Once published to [PyPI](https://pypi.org/project/ethicallama/), the
+simplest install is:
+
+```bash
+pip install ethicallama
+
+# With API server support:
+pip install "ethicallama[api]"
+
+# With everything (API, HF pulling, Safetensors conversion):
+pip install "ethicallama[all]"
+```
+
+Wheels are pre-built for Linux and macOS on Python 3.10+, so no
+compiler toolchain is required.
+
+### Via pipx (isolated CLI install)
+
+[pipx](https://pipx.pypa.io/) installs Python CLI tools in isolated
+environments, placing the `ethllama` command on your `PATH` without
+requiring manual venv management:
+
+```bash
+pipx install ethicallama
+
+# With API server support:
+pipx install "ethicallama[api]"
+
+# Upgrade later:
+pipx upgrade ethicallama
+```
+
+Use pipx when you want a global `ethllama` command without polluting
+system Python or maintaining a project-local venv.
+
+### Via uv (fast package manager)
+
+[uv](https://docs.astral.sh/uv/) is a Rust-based Python package manager
+that installs dependencies 10-100× faster than pip. If your system has
+`uv` installed:
+
+```bash
+# Inside a uv-managed venv
+uv pip install ethicallama
+
+# With all extras:
+uv pip install "ethicallama[all]"
+```
+
+**Run without installing** (one-shot — great for trying the CLI):
+
+```bash
+uv run --with ethicallama ethllama run llama3.2
+```
+
+For the full development workflow with uv (building the Rust core,
+running tests, etc.), see the "From source" section below and
+[AGENTS.md](../AGENTS.md).
+
+### From source
+
+For the latest unreleased code, custom Rust core builds, or
+contributing to the project. Requires the Rust toolchain, CMake, and a
+C/C++ compiler in addition to Python.
 
 ```bash
 # Clone the repository
-git clone https://github.com/luluthehungrycat/ethicallama.git
+git clone --recursive https://github.com/luluthehungrycat/ethicallama.git
 cd ethicallama
 
-# Initialize submodules (for llama.cpp dependency)
-git submodule update --init --recursive
+# Set up a venv (uv or stdlib venv both work)
+uv venv && source .venv/bin/activate
+# (or:  python3 -m venv .venv && source .venv/bin/activate)
 
-# Build the Rust core
-cargo build --release -p ethllama-core
+# Install build tooling + all extras
+uv pip install maturin ".[all]"
 
-# Install the Python package
-pip install -e ".[all]"
+# Build the Rust extension and install the Python package
+maturin develop --release
 
 # Initialize configuration
 ethllama config --init
 ```
+
+If you cloned without `--recursive`, run
+`git submodule update --init --recursive` so the `llama.cpp` submodule
+is present (the Rust build script needs it).
 
 ### Via Nix (reproducible dev shell)
 
@@ -51,11 +125,17 @@ pytest ethllama/tests/ -v
 Run `nix flake show` to list the available outputs and `nix fmt` to
 reformat the flake with the bundled `nixfmt-rfc-style`.
 
-### Via pip (when available)
+### Optional extras
 
-```bash
-pip install ethicallama
-```
+| Extra       | Adds                                                        |
+|-------------|-------------------------------------------------------------|
+| `[api]`     | FastAPI server (`ethllama serve`) + uvicorn + pydantic      |
+| `[pull]`    | HuggingFace Hub model pulling (`ethllama pull`)             |
+| `[convert]` | Safetensors → GGUF conversion (`ethllama convert`)          |
+| `[all]`     | All of the above                                            |
+
+Extras are stacked with commas, e.g. `pip install "ethicallama[api,pull]"`.
+They apply identically to `pip`, `uv pip`, and `pipx install` commands.
 
 ## CLI Reference
 
