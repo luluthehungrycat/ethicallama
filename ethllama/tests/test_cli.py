@@ -79,12 +79,69 @@ def test_config_help():
 
 
 def test_serve_help():
-    """Test that 'serve --help' shows host and port options."""
+    """Test that 'serve --help' shows host, port, and --model options."""
     runner = CliRunner()
     result = runner.invoke(main, ["serve", "--help"])
     assert result.exit_code == 0
     assert "host" in result.output.lower()
     assert "port" in result.output.lower()
+    # The new --model / -m option must be documented
+    assert "--model" in result.output
+    assert "-m" in result.output
+    assert "pre-load" in result.output.lower() or "preload" in result.output.lower()
+
+
+def test_serve_short_model_flag():
+    """Test that 'serve -m' is recognized as the model option."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["serve", "-m", "some-model", "--help"])
+    # -m should be accepted as a known option (no "no such option" error)
+    assert result.exit_code == 0
+    assert "no such option" not in result.output.lower()
+
+
+def test_serve_model_warning_for_missing_model(tmp_path, monkeypatch):
+    """`serve --model <missing>` prints a warning but doesn't crash before uvicorn import."""
+    from ethllama import index as index_mod
+
+    # Isolate the index so we know the model is definitely not present
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+
+    # Patch the lazy api import so the test doesn't actually start a server.
+    # If the warning path runs correctly, we expect run_server to be called
+    # with model_path=None; if it doesn't, the function will try to import
+    # the real api module and may fail on a headless box without fastapi.
+    import ethllama.cli as cli_mod
+    captured: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured.update(kwargs)
+        # Raise to break out of the server loop without actually listening
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: "")
+    monkeypatch.setattr("os.path.exists", lambda _p: False)
+    # Patch the lazy import by intercepting the import inside serve()
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        mod = real_import(name, *args, **kwargs)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server  # type: ignore[attr-defined]
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["serve", "--model", "definitely-not-a-real-model"]
+    )
+
+    # The warning should have been printed
+    assert "Warning" in result.output or "not found" in result.output.lower()
+    # And run_server was called with model_path=None (graceful fallback)
+    assert captured.get("model_path") is None
 
 
 def test_engines_help():
@@ -722,3 +779,231 @@ def test_transcribe_missing_engine_named(tmp_path, monkeypatch):
     assert result.exit_code != 0
     out = (result.output or "").lower()
     assert "nonexistent-engine" in out or "not found" in out
+
+
+# ---------------------------------------------------------------------------
+# Chat template extraction (GGUF metadata) and format_chat_messages
+# ---------------------------------------------------------------------------
+
+from ethllama.inference import read_chat_template, format_chat_messages
+
+
+def _build_minimal_gguf(
+    kv_pairs: list,
+    *,
+    version: int = 3,
+    tensor_count: int = 0,
+) -> bytes:
+    """Build a synthetic GGUF v3 byte string with the given KV pairs.
+
+    Each KV pair is a ``(key: str, value_type: int, payload: bytes)``
+    tuple where ``payload`` is the already-encoded value body
+    (e.g. ``struct.pack("<Q", n) + string.encode("utf-8")`` for a
+    string).  The GGUF magic, version, tensor count, and KV count are
+    written automatically.
+    """
+    data = bytearray()
+    data += b"GGUF"
+    data += struct.pack("<I", version)
+    data += struct.pack("<Q", tensor_count)
+    data += struct.pack("<Q", len(kv_pairs))
+    for key, vtype, payload in kv_pairs:
+        data += struct.pack("<Q", len(key))
+        data += key.encode("utf-8")
+        data += struct.pack("<I", vtype)
+        data += payload
+    return bytes(data)
+
+
+def _gguf_string_payload(value: str) -> bytes:
+    """Encode a Python string as a GGUF string value body."""
+    encoded = value.encode("utf-8")
+    return struct.pack("<Q", len(encoded)) + encoded
+
+
+def test_read_chat_template_basic():
+    """read_chat_template extracts the tokenizer.chat_template KV."""
+    expected = (
+        "<|user|>\n{{ .Prompt }}<|end|>\n<|assistant|>\n"
+    )
+    payload = _gguf_string_payload(expected)
+    blob = _build_minimal_gguf(
+        [("tokenizer.chat_template", 8, payload)]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        assert read_chat_template(path) == expected
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_empty_file():
+    """read_chat_template returns None for an empty file."""
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(b"")
+        path = f.name
+    try:
+        assert read_chat_template(path) is None
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_wrong_magic():
+    """read_chat_template returns None when magic bytes are not GGUF."""
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(b"NOTG" + b"\x00" * 24)
+        path = f.name
+    try:
+        assert read_chat_template(path) is None
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_unsupported_version():
+    """read_chat_template returns None for GGUF versions other than 3."""
+    blob = _build_minimal_gguf(
+        [("tokenizer.chat_template", 8, _gguf_string_payload("x"))],
+        version=2,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        assert read_chat_template(path) is None
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_key_not_present():
+    """read_chat_template returns None when key is missing from metadata."""
+    payload = _gguf_string_payload("llama")
+    blob = _build_minimal_gguf(
+        [("general.architecture", 8, payload)]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        assert read_chat_template(path) is None
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_later_in_metadata():
+    """read_chat_template finds the key even when not the first KV pair."""
+    expected = "[INST] {{ .Prompt }} [/INST]"
+    blob = _build_minimal_gguf([
+        ("general.architecture", 8, _gguf_string_payload("llama")),
+        ("general.name", 8, _gguf_string_payload("test-model")),
+        ("tokenizer.chat_template", 8, _gguf_string_payload(expected)),
+    ])
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        assert read_chat_template(path) == expected
+    finally:
+        os.unlink(path)
+
+
+def test_read_chat_template_skips_non_string_kvs():
+    """read_chat_template skips uint/array KVs that precede the template."""
+    expected = "<|start_header_id|>{{ .Role }}<|end_header_id|>\n"
+    blob = _build_minimal_gguf([
+        ("general.architecture", 8, _gguf_string_payload("llama")),
+        ("general.context_length", 4, struct.pack("<I", 4096)),
+        ("general.file_type", 4, struct.pack("<I", 1)),
+        ("tokenizer.chat_template", 8, _gguf_string_payload(expected)),
+    ])
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        assert read_chat_template(path) == expected
+    finally:
+        os.unlink(path)
+
+
+def test_format_chat_messages_uses_template_when_provided():
+    """format_chat_messages uses the GGUF chat template when available."""
+    template = (
+        "<|user|>\n{{ .Prompt }}<|end|>\n<|assistant|>\n"
+    )
+    blob = _build_minimal_gguf(
+        [("tokenizer.chat_template", 8, _gguf_string_payload(template))]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        out = format_chat_messages(
+            [{"role": "user", "content": "Hello"}],
+            model_path=path,
+        )
+        assert out == "<|user|>\nHello<|end|>\n<|assistant|>\n"
+    finally:
+        os.unlink(path)
+
+
+def test_format_chat_messages_falls_back_when_no_template():
+    """format_chat_messages falls back to the hardcoded format."""
+    blob = _build_minimal_gguf([])  # no KV pairs
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        out = format_chat_messages(
+            [{"role": "user", "content": "Hi"}],
+            model_path=path,
+        )
+        assert "<|im_start|>" in out
+        assert "Hi" in out
+    finally:
+        os.unlink(path)
+
+
+def test_format_chat_messages_legacy_call_no_model_path():
+    """format_chat_messages with no model_path uses the hardcoded format."""
+    out = format_chat_messages(
+        [
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "Hi"},
+        ]
+    )
+    assert "<|im_start|>system" in out
+    assert "You are terse." in out
+    assert "<|im_start|>user" in out
+    assert "Hi" in out
+    # The legacy function should still end with the assistant prompt
+    assert out.rstrip().endswith("<|im_start|>assistant")
+
+
+def test_format_chat_messages_template_with_system_and_response():
+    """The template substitution handles System and Response placeholders."""
+    template = (
+        "<|system|>{{ .System }}<|/system|>"
+        "<|user|>{{ .Prompt }}<|/user|>"
+        "<|assistant|>{{ .Response }}"
+    )
+    blob = _build_minimal_gguf(
+        [("tokenizer.chat_template", 8, _gguf_string_payload(template))]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(blob)
+        path = f.name
+    try:
+        out = format_chat_messages(
+            [
+                {"role": "system", "content": "Be kind."},
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello!"},
+            ],
+            model_path=path,
+        )
+        assert "Be kind." in out
+        assert "Hi" in out
+        assert "Hello!" in out
+    finally:
+        os.unlink(path)

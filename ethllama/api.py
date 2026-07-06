@@ -1,8 +1,10 @@
 """OpenAI-compatible HTTP API (opt-in) using FastAPI."""
 
+import os
 import time
 import json
 import asyncio
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -149,11 +151,37 @@ def _build_usage(prompt_tokens: int = 0, completion_tokens: int = 0) -> Dict[str
 
 
 def _model_path_and_gpu(model_name: str):
-    """Resolve model path and return (path, gpu_config)."""
+    """Resolve model path and return (path, gpu_config).
+
+    If a model was pre-loaded via ``serve --model``, requests that reference
+    that model by filename, stem, or absolute path will resolve to the
+    preloaded path even if the model is not present in the local index.
+    """
     from .inference import get_gpu_config
+
+    preloaded = getattr(app.state, "preloaded_model", None)
+    if preloaded and model_name:
+        preloaded_path = Path(preloaded)
+        preloaded_name = preloaded_path.name
+        preloaded_stem = preloaded_path.stem
+        # Match by basename, stem, or absolute path
+        if model_name == preloaded_name or model_name == preloaded_stem:
+            return preloaded, get_gpu_config()
+        try:
+            if os.path.abspath(model_name) == preloaded:
+                return preloaded, get_gpu_config()
+        except OSError:
+            pass
+
     path = resolve_model_path(model_name)
     if not path:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found in index")
+        # Fallback: try as a direct filesystem path
+        if model_name and os.path.exists(model_name):
+            return os.path.abspath(model_name), get_gpu_config()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_name}' not found in index",
+        )
     return path, get_gpu_config()
 
 
@@ -266,8 +294,35 @@ async def _stream_completion(request: CompletionRequest):
 
 @app.get("/v1/models")
 async def list_models(auth: bool = Depends(verify_api_key)):
-    """List available models from the local index (OpenAI-compatible)."""
+    """List available models from the local index (OpenAI-compatible).
+
+    A model that was pre-loaded via ``serve --model`` is included in the
+    response even if it is not present in the local index, so clients can
+    discover the active default model.
+    """
     models = _build_model_list()
+
+    # Add the preloaded model if it isn't already in the list
+    preloaded = getattr(app.state, "preloaded_model", None)
+    if preloaded:
+        preloaded_path = Path(preloaded)
+        preloaded_id = preloaded_path.stem
+        if not any(m.get("id") == preloaded_id for m in models):
+            try:
+                stat = preloaded_path.stat()
+                created = int(stat.st_mtime)
+            except OSError:
+                created = 0
+            models.insert(0, {
+                "id": preloaded_id,
+                "object": "model",
+                "created": created,
+                "owned_by": "user",
+                "permissions": [],
+                "root": str(preloaded_path),
+                "parent": None,
+            })
+
     return {
         "object": "list",
         "data": models,
@@ -419,8 +474,20 @@ def create_app() -> FastAPI:
     return app
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = ""):
-    """Run the API server with uvicorn."""
+def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
+               model_path: Optional[str] = None):
+    """Run the API server with uvicorn.
+
+    Parameters
+    ----------
+    host, port, api_key
+        Standard uvicorn / API auth configuration.
+    model_path
+        Absolute path to a GGUF model that should be advertised as
+        pre-loaded by the server. Stored on ``app.state.preloaded_model``
+        and surfaced in ``GET /v1/models`` and used as a fallback by
+        :func:`_model_path_and_gpu`.
+    """
     import uvicorn
 
     if api_key:
@@ -428,6 +495,10 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = ""):
         config = load_config()
         config.setdefault("api", {})["api_key"] = api_key
         save_config(config)
+
+    # Stash the preloaded model path on the FastAPI app state so route
+    # handlers can read it from any thread.
+    app.state.preloaded_model = model_path if model_path else None
 
     uvicorn.run(
         app,

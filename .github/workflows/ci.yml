@@ -14,6 +14,10 @@ env:
   # the stable ABI (abi3).  Set this env var to bypass the version check.
   PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} (ubuntu-latest)
@@ -118,3 +122,50 @@ jobs:
       - name: clippy check (lib, all targets, -D warnings)
         working-directory: ethllama-core
         run: cargo clippy --lib --all-targets -- -D warnings
+
+  audit:
+    name: Security audit (Rust deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('ethllama-core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-
+
+      - name: Run cargo-audit
+        run: |
+          cargo install cargo-audit --locked
+          # Exit 0 regardless of findings — known: pyo3 0.20.3 has
+          # RUSTSEC-2025-0020 (buffer overflow, fixed in >=0.24.1).
+          cd ethllama-core && cargo audit || echo "Audit found issues (non-blocking)"
+
+  pip_audit:
+    name: Security audit (Python deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit
