@@ -24,6 +24,33 @@ pip install -e ".[all]"
 ethllama config --init
 ```
 
+### Via Nix (reproducible dev shell)
+
+The project ships a `flake.nix` that provides a reproducible dev shell with
+the full Rust + Python + llama.cpp build chain pre-installed. If you are on
+NixOS or have the Nix package manager installed, this is the recommended
+way to develop ethicallama.
+
+```bash
+# Enter the dev shell (provides rustc, cargo, maturin, cmake, ninja,
+# gcc, clang, vulkan-headers, vulkan-loader, openssl, git, etc.)
+nix develop
+
+# The shellHook auto-initializes the llama.cpp git submodule if missing.
+
+# Build the Python extension (recommended uv workflow)
+uv venv
+source .venv/bin/activate
+uv pip install maturin '.[all]'
+maturin develop --release
+
+# Run the test suite
+pytest ethllama/tests/ -v
+```
+
+Run `nix flake show` to list the available outputs and `nix fmt` to
+reformat the flake with the bundled `nixfmt-rfc-style`.
+
 ### Via pip (when available)
 
 ```bash
@@ -85,6 +112,65 @@ ethllama run model.safetensors --engine my-custom-engine -p "Hello"
 
 # Save output
 ethllama run model.gguf -p "Summarize this" -o summary.txt
+```
+
+#### `run --interactive` -- Interactive REPL mode
+
+```
+ethllama run <model> -i [options]
+```
+
+`ethllama run` enters an interactive chat loop when invoked with `-i`/`--interactive`,
+or automatically when no `--prompt` is given and stdin is a TTY.
+
+REPL options (added to `run`):
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--interactive`, `-i` | `False` | Enter interactive REPL mode (overrides `--prompt`) |
+| `--prompt-prefix` | `"> "` | REPL prompt prefix shown before each input |
+| `--max-history` | `10` | Max conversation turns to keep in history |
+| `--system` | `None` | Initial system prompt for the session |
+
+Slash commands available inside the REPL:
+
+| Command | Description |
+|---------|-------------|
+| `/exit`, `/quit` | Exit the REPL |
+| `/clear` | Clear conversation history (keeps system prompt) |
+| `/system <text>` | Set or replace the system prompt |
+| `/temp <float>` | Change sampling temperature for subsequent turns |
+| `/help` | Show available commands |
+| `/history` | Show the current conversation history |
+
+Input rules:
+
+- A line ending with `\` continues to the next line (multi-line input).
+- A blank line (or EOF / Ctrl+D) submits the accumulated buffer.
+- A non-blank, non-continuation line submits immediately as a single-line message.
+- `Ctrl+C` cancels the current input or exits the REPL gracefully.
+
+Examples:
+
+```bash
+# Start an interactive chat session
+ethllama run ~/models/llama-3.2-3b-q4.gguf -i
+
+# REPL with a custom prompt prefix and larger history
+ethllama run model.gguf -i --prompt-prefix ">>> " --max-history 20
+
+# Start with an initial system prompt
+ethllama run model.gguf -i --system "You are a helpful coding assistant."
+
+# --interactive overrides --prompt (prompt is ignored)
+ethllama run model.gguf -i -p "this prompt is ignored"
+```
+
+Welcome banner on entry:
+
+```
+ethicallama REPL — model: llama-3.2-3b-q4.gguf, type /exit to quit
+Type /help for a list of commands.
 ```
 
 #### `serve` -- Start HTTP API server
@@ -168,6 +254,111 @@ ethllama index scan
 # Clear index
 ethllama index clear
 ```
+
+#### `rm` -- Remove a model
+
+```
+ethllama rm <model> [options]
+```
+
+Removes a model from the index. By default, only the index entry is
+removed — the file on disk is left intact. Pass `--purge` to also
+delete the file from disk; because that's destructive, `rm` prompts
+for confirmation unless `--yes` is given.
+
+Arguments:
+
+| Argument | Description |
+|----------|-------------|
+| `model`  | Filename (matched against the index), a path, or `~`-expanded path |
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `--purge`, `-p` | Also delete the model file from disk |
+| `--yes`, `-y`   | Skip the confirmation prompt when `--purge` is set |
+
+Examples:
+
+```bash
+# Just remove from the index, keep the file
+ethllama rm qwen3-0.8b-q4km.gguf
+
+# Remove from the index AND delete the file (with confirmation)
+ethllama rm /home/user/models/qwen3-0.8b-q4km.gguf --purge
+
+# Skip the confirmation (scriptable)
+ethllama rm /home/user/models/qwen3-0.8b-q4km.gguf --purge --yes
+```
+
+Resolution order: direct file path → `~`-expanded path → index
+lookup via `resolve_model_path()`. If the model cannot be found,
+`rm` exits with status 1 and prints a "not found" message.
+
+#### `info` -- Show model metadata
+
+```
+ethllama info <model> [options]
+```
+
+Displays filesystem metadata (path, size, modification time, whether
+the file is in the index) and, for `.gguf` files, the parsed GGUF
+header: architecture, context length, embedding length, quantization
+label, and parameter count.
+
+Arguments:
+
+| Argument | Description |
+|----------|-------------|
+| `model`  | Filename (matched against the index) or a direct path to a file |
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `--json`         | Output the metadata as JSON (machine-readable) |
+| `--verbose`, `-v` | Show every metadata KV pair in the GGUF header |
+
+Examples:
+
+```bash
+# Human-readable summary
+ethllama info qwen3-0.8b-q4km.gguf
+
+# Direct path to a model file
+ethllama info /home/user/models/qwen3-0.8b-q4km.gguf
+
+# JSON output (pipe to jq, etc.)
+ethllama info qwen3-0.8b-q4km.gguf --json
+
+# Full metadata dump (every KV pair)
+ethllama info qwen3-0.8b-q4km.gguf --verbose
+```
+
+Sample human-readable output:
+
+```
+Model: qwen3-0.8b-q4km.gguf
+  Path:     /home/user/.ethllama/models/qwen3-0.8b-q4km.gguf
+  Size:     524.3 MB
+  Modified: 2026-06-15 14:23:01
+  Indexed:  yes
+
+  GGUF Metadata:
+    Architecture:      qwen3
+    Context length:    32768
+    Embedding length:  1024
+    GGUF version:      3
+    Quantization:      Q4_K_M
+    Parameters:        0.8B
+
+  (197 tensors, 5 metadata keys)
+```
+
+For non-GGUF files, `info` still prints the basic filesystem
+metadata and a "Not a GGUF file" warning — useful for inspecting
+files you haven't fully identified yet.
 
 ## Configuration
 
@@ -346,6 +537,63 @@ Health check endpoint.
 ```bash
 curl http://localhost:8080/health
 ```
+
+#### `transcribe` -- Speech-to-text (whisper.cpp)
+
+```
+ethllama transcribe <audio_file> [options]
+```
+
+Transcribes an audio file (wav, mp3, m4a, ...) using a whisper.cpp engine.
+The command auto-detects an installed STT engine from
+`~/.ethllama/engines/`; if none is registered, it falls back to looking
+for `whisper-cli` (or the legacy `main` binary) on `$PATH`.
+
+Arguments:
+
+| Argument | Description |
+|----------|-------------|
+| `audio_file` | Path to the audio file to transcribe |
+
+Options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--engine`, `-e` | (auto) | Engine name from `~/.ethllama/engines/` (must have `type: stt`) |
+| `--model`, `-m` | engine default | Explicit path to the whisper model file (.bin / .ggml) |
+| `--output-format`, `-of` | `text` | Output format: `text`, `json`, `srt`, `vtt` |
+| `--language`, `-l` | `auto` | Language code (e.g. `en`, `de`, `fr`) or `auto` |
+| `--threads`, `-t` | `4` | Number of CPU threads |
+| `--output`, `-o` | (stdout) | Save output to FILE instead of printing |
+
+Examples:
+
+```bash
+# Plain text transcription
+ethllama transcribe recording.wav
+
+# Explicit model + JSON output
+ethllama transcribe interview.mp3 -m ~/models/ggml-large.bin -of json
+
+# German, save to subtitles
+ethllama transcribe meeting.wav -l de -of srt -o meeting.srt
+
+# Use a specific engine
+ethllama transcribe sample.wav --engine whisper-cpp
+```
+
+##### Setting up whisper.cpp
+
+1. Build whisper.cpp and place the `whisper-cli` binary somewhere on `$PATH`
+   (e.g. `/usr/local/bin/whisper-cli`).
+2. Copy the example engine config to `~/.ethllama/engines/`:
+   ```bash
+   cp docs/examples/whisper-cpp.yaml ~/.ethllama/engines/
+   ```
+3. Edit `binary` and `default_model` in the YAML to match your install.
+4. Verify with `ethllama engines` -- the whisper-cpp entry should show ✓.
+
+See `docs/examples/whisper-cpp.yaml` for a complete engine config.
 
 ## Custom Engine Configuration
 

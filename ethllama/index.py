@@ -1,7 +1,7 @@
 import os
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 INDEX_FILE = Path.home() / ".ethllama" / "index.json"
 
@@ -37,3 +37,54 @@ def resolve_model_path(model_identifier: str) -> str:
             if model["filename"] == model_identifier or model["path"].endswith(model_identifier):
                 return model["path"]
     return ""
+
+def remove_from_index(model_path: str) -> bool:
+    """Remove a model from the index by its path. Returns True if removed, False if not found."""
+    index = load_index()
+    removed = False
+    for dir_path in list(index.keys()):
+        original_len = len(index[dir_path])
+        index[dir_path] = [
+            entry for entry in index[dir_path]
+            if entry["path"] != model_path and entry["filename"] != os.path.basename(model_path)
+        ]
+        if len(index[dir_path]) < original_len:
+            removed = True
+        # Clean up empty directories
+        if not index[dir_path]:
+            del index[dir_path]
+    if removed:
+        save_index(index)
+    return removed
+
+def find_in_index(model_identifier: str) -> Optional[Dict[str, Any]]:
+    """Find a model entry in the index. Returns the entry dict with dir_path added, or None."""
+    index = load_index()
+    for dir_path, models in index.items():
+        for model in models:
+            if (model["filename"] == model_identifier
+                    or model["path"] == model_identifier
+                    or model["path"].endswith(model_identifier)):
+                entry = dict(model)
+                entry["dir_path"] = dir_path
+                return entry
+    return None
+
+
+def list_all_indexed() -> List[Dict[str, Any]]:
+    """Return a flat list of all indexed models with their full metadata.
+
+    Each entry contains the original index fields (``filename``, ``path``,
+    ``size``, ``modified``) plus a synthetic ``dir_path`` field pointing to
+    the parent directory in the index. The list is sorted by
+    ``dir_path`` then ``filename`` for stable output.
+    """
+    index = load_index()
+    flat: List[Dict[str, Any]] = []
+    for dir_path, models in index.items():
+        for model in models:
+            entry: Dict[str, Any] = dict(model)
+            entry["dir_path"] = dir_path
+            flat.append(entry)
+    flat.sort(key=lambda e: (e.get("dir_path", ""), e.get("filename", "")))
+    return flat

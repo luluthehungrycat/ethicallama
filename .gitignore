@@ -1,5 +1,12 @@
 # Build artifacts
 ethllama-core/target/
+llama.cpp-build/
+
+# Internal development tracking
+.slim/
+
+# Ruff
+.ruff_cache/
 *.pyc
 __pycache__/
 *.pyo

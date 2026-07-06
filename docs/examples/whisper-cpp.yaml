@@ -1,6 +1,14 @@
 name: whisper-cpp
 type: stt
 binary: /usr/local/bin/whisper-cli
+# Default model path used when the user does not pass --model on the
+# command line. The path is expanded with os.path.expanduser so values
+# starting with "~" are supported.
+default_model: ~/.ethllama/models/ggml-base.en.bin
+# args_template is exposed for users who want to wire a custom binary
+# through EngineConfig.render_command(...). The transcribe command itself
+# builds the standard whisper-cli arguments directly in stt.py and does
+# not invoke render_command.
 args_template: >
   {{ binary }} -m {{ model_path }} -f {{ prompt }} -otxt
   -t {{ threads }}
@@ -9,5 +17,6 @@ env: {}
 pre_check: "{{ binary }} --version 2>&1 | head -1"
 supports_streaming: false
 model_extensions:
-  - .ggml
   - .bin
+  - .ggml
+  - .gguf

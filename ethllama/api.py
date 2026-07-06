@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from .config import load_config
 from .index import load_index, resolve_model_path
+from .inference import run_inference, get_embeddings, get_gpu_config, format_chat_messages
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -147,14 +148,35 @@ def _build_usage(prompt_tokens: int = 0, completion_tokens: int = 0) -> Dict[str
     }
 
 
+def _model_path_and_gpu(model_name: str):
+    """Resolve model path and return (path, gpu_config)."""
+    from .inference import get_gpu_config
+    path = resolve_model_path(model_name)
+    if not path:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found in index")
+    return path, get_gpu_config()
+
+
 # ---------------------------------------------------------------------------
 # Streaming helpers
 # ---------------------------------------------------------------------------
 
 async def _stream_chat_completion(request: ChatCompletionRequest):
     """Stream chat completion response as Server-Sent Events."""
-    response_text = _simulate_chat_response(request.messages, request.temperature or 0.7)
-    # Yield as individual "tokens" (words for the placeholder)
+    from .inference import format_chat_messages
+    model_path, gpu = _model_path_and_gpu(request.model)
+    response_text = await asyncio.to_thread(
+        run_inference,
+        model_path=model_path,
+        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.9,
+        top_k=request.top_k or 40,
+        max_tokens=request.max_tokens or 2048,
+        n_gpu_layers=gpu["n_gpu_layers"],
+        n_threads=gpu["n_threads"],
+        stop=request.stop,
+    )
     words = response_text.split()
     for i, word in enumerate(words):
         chunk = {
@@ -172,7 +194,6 @@ async def _stream_chat_completion(request: ChatCompletionRequest):
         }
         yield f"data: {json.dumps(chunk)}\n\n"
         await asyncio.sleep(0.02)
-    # Final chunk with finish_reason
     final_chunk = {
         "id": f"cmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -192,7 +213,19 @@ async def _stream_chat_completion(request: ChatCompletionRequest):
 
 async def _stream_completion(request: CompletionRequest):
     """Stream text completion as Server-Sent Events."""
-    response_text = _simulate_completion(request.prompt, request.temperature or 0.7)
+    model_path, gpu = _model_path_and_gpu(request.model)
+    response_text = await asyncio.to_thread(
+        run_inference,
+        model_path=model_path,
+        prompt=request.prompt,
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.9,
+        top_k=request.top_k or 40,
+        max_tokens=request.max_tokens or 2048,
+        n_gpu_layers=gpu["n_gpu_layers"],
+        n_threads=gpu["n_threads"],
+        stop=request.stop,
+    )
     words = response_text.split()
     for i, word in enumerate(words):
         chunk = {
@@ -247,25 +280,26 @@ async def embeddings(
     auth: bool = Depends(verify_api_key),
 ):
     """OpenAI-compatible embeddings endpoint."""
+    model_path, gpu = _model_path_and_gpu(request.model)
     inputs = request.input if isinstance(request.input, list) else [request.input]
-    data = []
-    total_tokens = 0
-    for idx, text in enumerate(inputs):
-        embedding = _simulate_embedding(text)
-        total_tokens += max(len(text) // 4, 1)
-        data.append({
-            "object": "embedding",
-            "index": idx,
-            "embedding": embedding,
-        })
+    # Run in executor
+    embeddings = await asyncio.to_thread(
+        get_embeddings,
+        model_path=model_path,
+        texts=inputs,
+        n_gpu_layers=gpu["n_gpu_layers"],
+        n_threads=gpu["n_threads"],
+    )
+    total_tokens = sum(max(len(t) // 4, 1) for t in inputs)
+    data = [
+        {"object": "embedding", "index": idx, "embedding": emb}
+        for idx, emb in enumerate(embeddings)
+    ]
     return {
         "object": "list",
         "data": data,
         "model": request.model,
-        "usage": {
-            "prompt_tokens": total_tokens,
-            "total_tokens": total_tokens,
-        },
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
     }
 
 
@@ -292,7 +326,19 @@ async def chat_completions(
             },
         )
 
-    response_text = _simulate_chat_response(request.messages, request.temperature or 0.7)
+    model_path, gpu = _model_path_and_gpu(request.model)
+    response_text = await asyncio.to_thread(
+        run_inference,
+        model_path=model_path,
+        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.9,
+        top_k=request.top_k or 40,
+        max_tokens=request.max_tokens or 2048,
+        n_gpu_layers=gpu["n_gpu_layers"],
+        n_threads=gpu["n_threads"],
+        stop=request.stop,
+    )
     return {
         "id": f"cmpl-{int(time.time())}",
         "object": "chat.completion",
@@ -332,7 +378,19 @@ async def completions(
             },
         )
 
-    response_text = _simulate_completion(request.prompt, request.temperature or 0.7)
+    model_path, gpu = _model_path_and_gpu(request.model)
+    response_text = await asyncio.to_thread(
+        run_inference,
+        model_path=model_path,
+        prompt=request.prompt,
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.9,
+        top_k=request.top_k or 40,
+        max_tokens=request.max_tokens or 2048,
+        n_gpu_layers=gpu["n_gpu_layers"],
+        n_threads=gpu["n_threads"],
+        stop=request.stop,
+    )
     return {
         "id": f"cmpl-{int(time.time())}",
         "object": "text_completion",

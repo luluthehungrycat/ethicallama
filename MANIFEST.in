@@ -1,0 +1,54 @@
+# ----------------------------------------------------------------------------
+# MANIFEST.in for ethicallama
+# ----------------------------------------------------------------------------
+# This file controls what files are included in a sdist built by `python -m
+# build --sdist`. Maturin handles the compiled Rust extension and the wheel
+# build, so this file is only consulted for the source distribution.
+#
+# Patterns are case-sensitive on case-sensitive filesystems; recursive
+# includes use shell-style globs.
+# ----------------------------------------------------------------------------
+
+# --- Top-level project metadata ---
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CREDITS.md
+include AGENTS.md
+include pyproject.toml
+include MANIFEST.in
+
+# --- Python source package (the `ethllama` package itself) ---
+recursive-include ethllama *.py *.yaml *.yml
+
+# --- Documentation ---
+recursive-include docs *.md *.yaml *.yml
+
+# --- Helper scripts (setup.sh, benchmark.sh, ...) ---
+recursive-include scripts *.sh
+
+# --- Example engine configs shipped in the repo ---
+recursive-include examples *.yaml *.yml 2>/dev/null
+# (the `examples/` directory is optional — it may not exist in the git
+# checkout, hence the `2>/dev/null` to silence the no-match warning)
+
+# --- Test data: minimal GGUF blobs the test suite references ---
+recursive-include ethllama/tests *.json
+
+# --- Prune heavy / generated directories that MUST NOT ship in sdist ---
+#   - target/          : cargo build artifacts
+#   - llama.cpp-build/ : cmake build tree for the bundled llama.cpp
+#   - ethllama-core/llama.cpp/ : the git submodule (it's a separate repo)
+#   - .slim/           : opencode plugin cache
+#   - .benchmarks/     : local benchmark outputs
+#   - dist/ build/ *.egg-info/ : sdist / wheel build output
+prune ethllama-core/target
+prune llama.cpp-build
+prune ethllama-core/llama.cpp
+prune .slim
+prune .benchmarks
+prune dist
+prune build
+prune *.egg-info
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc

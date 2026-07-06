@@ -112,3 +112,47 @@ fn ethllama_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyLlamaModel>()?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+//
+// PyO3-bound code (`PyLlamaModel::new`, `infer`, `gpu_info`) is hard to
+// unit-test without a live Python interpreter and a GGUF model on disk.
+// Those paths are covered by the integration tests in `ethllama/tests/`.
+// The tests here focus on the compile-time correctness of the bindings
+// and the structure of the Rust crate itself.
+
+#[cfg(test)]
+mod tests {
+    /// Sanity test: the crate compiles and the test harness runs.
+    /// This is a "trivially true" test that exists to confirm the test
+    /// binary built at all (i.e. PyO3 + llama.cpp + cdylib all linked).
+    #[test]
+    fn test_crate_compiles() {
+        // If this runs, the crate compiled.
+    }
+
+    /// `PyLlamaModel` must be `Send` (the `unsafe impl Send` is required
+    /// for PyO3 to hand instances across threads). This is a static
+    /// check — the test will fail to compile if `Send` is ever removed.
+    #[test]
+    fn test_pyllamamodel_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<crate::PyLlamaModel>();
+    }
+
+    /// Verify the `unsafe impl Send` does not silently make the type
+    /// `!Sync` (PyO3 also requires `Sync` for some patterns).
+    /// If this test stops compiling, check the `unsafe impl Send`
+    /// declaration in lib.rs.
+    #[allow(dead_code)]
+    fn _check_sync_bounds() {
+        fn assert_sync<T: Sync>() {}
+        // Note: PyLlamaModel intentionally implements only `Send`, not
+        // `Sync`. This helper documents that decision — do not call it
+        // from a test, just keep it in the build for documentation.
+        // assert_sync::<crate::PyLlamaModel>();
+        let _ = assert_sync::<u8>; // silence unused warning
+    }
+}

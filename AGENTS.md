@@ -27,10 +27,12 @@ ethicallama/
 │       ├── llama.rs            # FFI declarations (extern "C") matching real llama.h API
 │       └── utils.rs            # GPU detection (nvidia-smi, rocm-smi, vulkaninfo)
 │
+├── pyproject.toml              # maturin build config + Python deps (repo root)
 ├── ethllama/                   # Python package
-│   ├── pyproject.toml          # maturin build config + Python deps
 │   ├── __init__.py             # Re-exports from submodules
-│   ├── cli.py                  # Click CLI (run, pull, list, index, config, serve, engines, quantize)
+│   ├── cli.py                  # Click CLI (11 subcommands: run, pull, list, index, config, serve, engines, quantize, rm, info, transcribe)
+│   ├── cli_mgmt.py             # Model management subcommands (rm, info)
+│   ├── cli_stt.py              # Speech-to-text subcommand (transcribe)
 │   ├── api.py                  # FastAPI (OpenAI-compatible, opt-in)
 │   ├── config.py               # Config load/save/init (~/.ethllama/config.yaml)
 │   ├── engines.py              # EngineConfig with Jinja2 templating for custom engine binaries
@@ -258,13 +260,70 @@ If you encounter a new recurring workflow during development, write it as a skil
 
 **Skills are living documents.** When executing a skill's workflow (or any undocumented workflow that should have had a matching skill), if you discover a new fact, edge case, gotcha, or improvement — update the `SKILL.md` to capture it. Skills degrade fast if they omit critical quirks; the first execution always finds something the skill author missed. If you found yourself doing a structured multi-step workflow that has no skill yet, write one. Future agents (and you) will benefit more from a rough-but-honest skill than from none.
 
+## Nix Development
+
+The project ships a `flake.nix` that provides a reproducible dev shell with
+the full Rust + Python + llama.cpp build chain pre-installed. Use it if you
+are on NixOS or have the Nix package manager installed.
+
+### What the dev shell provides
+
+- **Rust toolchain** (latest stable via `rust-overlay`) - `cargo`, `rustc`,
+  `clippy`, `rustfmt`, `rust-analyzer`
+- **Python 3** + `maturin` + `pip` on `PATH` (so `pip install -e .` also works
+  without a separate venv install)
+- **Native build deps** - `cmake`, `ninja`, `pkg-config`, `openssl`, `git`
+- **C/C++ compilers** - `gcc` and `clang` (the `cc` and `cmake` crates pick
+  whichever is first on `PATH`)
+- **Optional GPU** - `vulkan-headers`, `vulkan-loader` (only used when
+  building the standalone `llama.cpp` binaries with `-DLLAMA_VULKAN=ON`; the
+  bundled `ethllama-core` is CPU-only)
+- **`PKG_CONFIG_PATH`** set so pkg-config consumers can find `openssl`
+
+### Entering the shell
+
+```bash
+nix develop            # default shell with everything
+# or
+nix develop .#default  # same thing, explicit
+```
+
+### shellHook behavior
+
+- If `.gitmodules` exists but the `ethllama-core/llama.cpp/common` directory
+  is missing, runs `git submodule update --init --recursive` automatically.
+- Prints a banner with versions of all key tools.
+- Prints a quickstart reminder (uv workflow + standalone llama.cpp build).
+
+### Quickstart (from inside the dev shell)
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install maturin '.[all]'
+maturin develop --release
+pytest ethllama/tests/ -v
+```
+
+### Formatter
+
+The flake exposes `nixfmt-rfc-style` as the default formatter. Run
+`nix fmt` to reformat the flake in place.
+
+### Adding new tools
+
+When you discover a new build/runtime dependency that the shell is missing,
+add it to the `buildInputs` list in `devShells.default`. Keep the comments
+grouped by purpose (Rust / Python / native / compilers / GPU) so the list
+stays readable as it grows.
+
 ## Cross-Session Context Tips
 
 - The `engines.py` `EngineConfig` class with Jinja2 templating is the **extension mechanism** for custom engines — this is the plugin system
 - When adding new subcommands, add them to `cli.py`'s `@click.group()` and re-export from `__init__.py`
 - When extending the Rust FFI, always add the `extern "C"` declaration to `llama.rs`, then wrap it in a safe function, then expose via PyO3 in `lib.rs`
 - The `__all__` in `__init__.py` must be kept in sync with exports
-- `pyproject.toml` uses maturin, and the `[tool.maturin]` section configures how the Rust crate is built
+- `pyproject.toml` at repo root uses maturin, and the `[tool.maturin]` section configures how the Rust crate is built (manifest-path points to `ethllama-core/Cargo.toml`)
 - Always use `options = ["pyo3/extension-module"]` in `[features]` (no "pyo3" prefix for maturin — just the feature name)
 - Run `pip install -e ".[all]"` to install all optional dependencies for development
 

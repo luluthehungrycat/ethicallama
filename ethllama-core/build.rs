@@ -18,6 +18,13 @@ fn main() {
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_COMMON", "OFF")
         .define("LLAMA_BUILD_APP", "OFF")
+        // Disable GPU backends — CPU-only for the core library
+        .define("LLAMA_CUDA", "OFF")
+        .define("LLAMA_METAL", "OFF")
+        .define("LLAMA_VULKAN", "OFF")
+        .define("LLAMA_HIPBLAS", "OFF")
+        .define("LLAMA_SYCL", "OFF")
+        .define("LLAMA_KOMPUTE", "OFF")
         .build();
 
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
@@ -30,6 +37,16 @@ fn main() {
     println!("cargo:rustc-link-lib=pthread");
     println!("cargo:rustc-link-lib=dl");
     println!("cargo:rustc-link-lib=stdc++");
+    println!("cargo:rustc-link-lib=gomp");
+
+    // Compile the C++ exception-safety shim
+    // This is compiled as C++ and linked into the cdylib
+    cc::Build::new()
+        .cpp(true)
+        .file("src/shim.cpp")
+        .include("llama.cpp/include")
+        .include("llama.cpp/ggml/include")
+        .compile("ethllama_shim");
 
     // Rerun if headers/CMakeLists change
     println!("cargo:rerun-if-changed=llama.cpp/include/llama.h");
@@ -37,4 +54,5 @@ fn main() {
     println!("cargo:rerun-if-changed=llama.cpp/ggml/CMakeLists.txt");
     println!("cargo:rerun-if-changed=llama.cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/shim.cpp");
 }

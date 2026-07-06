@@ -1,5 +1,11 @@
 # ethicallama
 
+<!-- TODO: replace `your-org` with the actual GitHub owner once the repo is created. -->
+[![CI](https://github.com/your-org/ethicallama/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/ethicallama/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ethicallama)](https://pypi.org/project/ethicallama/)
+[![License](https://img.shields.io/github/license/your-org/ethicallama)](LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/ethicallama)](https://pypi.org/project/ethicallama/)
+
 A local-first, privacy-respecting LLM inference wrapper for running large language models entirely on your own hardware.
 
 ## Features
