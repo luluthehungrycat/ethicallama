@@ -10,6 +10,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fno-omit-frame-pointer
+  # pyo3 0.20 doesn't detect Python 3.13+ as supported, but it works via
+  # the stable ABI (abi3).  Set this env var to bypass the version check.
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
 jobs:
   test:
@@ -68,7 +71,7 @@ jobs:
       - name: Install Python tooling
         run: |
           python -m pip install --upgrade pip
-          pip install maturin pytest pytest-asyncio httpx
+          pip install maturin pytest pytest-asyncio httpx fastapi uvicorn pydantic
 
       - name: Build Rust extension and install package
         run: |
