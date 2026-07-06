@@ -57,7 +57,9 @@ features = ["pyo3/extension-module"]
 module-name = "ethllama_core._core"
 bindings = "pyo3"
 manifest-path = "ethllama-core/Cargo.toml"
-python-source = "ethllama"
+# python-source deliberately unset so that maturin auto-discovers
+# the ethllama/ package and places the ethllama_core extension
+# at the correct top-level location.
 
 [tool.pytest.ini_options]
 testpaths = ["ethllama/tests"]
