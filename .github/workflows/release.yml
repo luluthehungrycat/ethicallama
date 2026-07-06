@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build wheels and sdist only (do not publish to PyPI)"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fno-omit-frame-pointer
+  # Manylinux containers run an old glibc, so we pin the toolchain.
+  CIBW_ENVIRONMENT: 'RUSTFLAGS="-C link-arg=-fno-omit-frame-pointer" MATH_BACKEND=openblas'
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — manylinux2014 (PEP 600 marker: glibc 2.17+)
+          - os: ubuntu-latest
+            cibw_arch: x86_64
+          # Linux aarch64 — manylinux2014
+          - os: ubuntu-latest
+            cibw_arch: aarch64
+          # macOS arm64 (Apple Silicon)
+          - os: macos-14
+            cibw_arch: arm64
+          # macOS x86_64 (Intel)
+          - os: macos-13
+            cibw_arch: x86_64
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-release-${{ matrix.cibw_arch }}-${{ hashFiles('ethllama-core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ matrix.cibw_arch }}-
+
+      - name: Set up QEMU for aarch64 cross-builds
+        if: matrix.cibw_arch == 'aarch64' && runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.22.0
+        with:
+          package-dir: .
+          config-file: pyproject.toml
+          output-dir: wheelhouse
+          # Build only this architecture's wheels in this matrix entry.
+          # CIBW_ARCHS is read by cibuildwheel inside the container.
+          environment: |
+            CIBW_ARCHS=${{ matrix.cibw_arch }}
+
+      - name: Upload wheels as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.cibw_arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  build_sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build frontend
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build sdist
+        run: |
+          # The Rust source is bundled but not compiled in the sdist.
+          # Build the sdist from the repo root where pyproject.toml now lives.
+          python -m build --sdist --outdir dist/
+
+      - name: Upload sdist as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  github_release:
+    name: Attach artifacts to GitHub Release
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    # Allow the step to succeed on workflow_dispatch (no tag) so manual
+    # runs can still produce artifacts without a release being created.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Display contents of release artifacts
+        run: |
+          ls -laR artifacts
+
+      - name: Create GitHub Release and attach artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "ethicallama ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: |
+            artifacts/*.whl
+            artifacts/*.tar.gz
+          fail_on_unmatched_files: true
+
+  publish_pypi:
+    name: Publish to PyPI (OIDC trusted publishing)
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ethicallama
+    permissions:
+      id-token: write  # REQUIRED for PyPI trusted publishing (OIDC)
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # No `password:` is passed — OIDC token from the id-token permission
+          # is exchanged for a PyPI API token by the action automatically.
+          skip-existing: true

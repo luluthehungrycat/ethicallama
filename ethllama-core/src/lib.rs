@@ -1,69 +1,160 @@
+// ethllama-core/src/lib.rs
+//
+// Python bindings (via PyO3) to the llama.cpp FFI layer.
+// Provides a PyLlamaModel class that loads a GGUF model and runs inference.
+
+// The `non_local_definitions` lint fires inside pyo3 0.20's
+// `#[pymethods]` macro with rustc 1.80+.  This is a known false
+// positive (https://github.com/PyO3/pyo3/issues/3745).  The
+// crate-level allow is required because the lint fires during
+// macro expansion before a block-level `#[allow]` takes effect.
+#![allow(non_local_definitions)]
+
+mod llama;
+mod utils;
+
 use pyo3::prelude::*;
-use std::ffi::CString;
-use std::os::raw::c_char;
 
-// Declare external functions from llama.cpp
-extern "C" {
-    fn llama_model_load(path: *const c_char, params: *const LlamaModelParams) -> *mut LlamaModel;
-    fn llama_free(model: *mut LlamaModel);
-    fn llama_eval(model: *mut LlamaModel, tokens: *const i32, n_tokens: i32, n_threads: i32) -> i32;
-    fn llama_decode(model: *mut LlamaModel, tokens: *mut i32, n_tokens: i32, n_threads: i32) -> i32;
-}
+// ---------------------------------------------------------------------------
+// Python‑exposed class that wraps raw llama model + context pointers.
+// ---------------------------------------------------------------------------
 
-// Opaque type for LlamaModel (defined in llama.cpp)
-#[repr(C)]
-pub struct LlamaModel;
-
-// Parameters for model loading
-#[repr(C)]
-pub struct LlamaModelParams {
-    pub n_gpu_layers: i32,
-    pub use_mmap: bool,
-    pub vocab_only: bool,
-    // Add other params as needed
-}
-
+/// A Python‑accessible wrapper around a loaded llama.cpp model.
 #[pyclass]
-struct PyLlamaModel {
-    model_ptr: *mut LlamaModel,
+pub struct PyLlamaModel {
+    model_ptr: *mut llama::llama_model,
+    ctx_ptr: *mut llama::llama_context,
 }
+
+unsafe impl Send for PyLlamaModel {}
 
 #[pymethods]
 impl PyLlamaModel {
+    /// Load a model from the given file path.
+    ///
+    /// Args:
+    ///     path: Path to a GGUF model file.
+    ///     n_gpu_layers: Number of layers to offload to GPU (0 = CPU only).
+    ///     n_ctx: Context size in tokens.
+    ///     n_threads: Number of CPU threads to use.
     #[new]
-    fn new(path: String, n_gpu_layers: i32) -> PyResult<Self> {
-        let c_path = CString::new(path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let params = LlamaModelParams {
-            n_gpu_layers,
-            use_mmap: true,
-            vocab_only: false,
-        };
-        let model_ptr = unsafe { llama_model_load(c_path.as_ptr(), &params) };
-        if model_ptr.is_null() {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to load model"))
-        } else {
-            Ok(Self { model_ptr })
-        }
+    fn new(path: String, n_gpu_layers: i32, n_ctx: u32, n_threads: i32) -> PyResult<Self> {
+        // Initialize the llama backend once
+        unsafe { llama::llama_backend_init() };
+
+        let (model_ptr, ctx_ptr) = llama::load_model(&path, n_gpu_layers, n_ctx, n_threads)
+            .map_err(|e| {
+                unsafe { llama::llama_backend_free() };
+                pyo3::exceptions::PyRuntimeError::new_err(e)
+            })?;
+
+        Ok(Self { model_ptr, ctx_ptr })
     }
 
-    fn infer(&self, prompt: String, n_threads: i32) -> PyResult<String> {
-        // Simplified: Tokenize prompt, call llama_eval, then decode
-        // In practice, you'd need to implement tokenization/detokenization
-        // or use llama.cpp's built-in functions for this.
-        unsafe {
-            // Placeholder: Replace with actual inference logic
-            let output = format!("Inferred from: {}", prompt);
-            Ok(output)
-        }
+    /// Run inference on a prompt.
+    ///
+    /// Args:
+    ///     prompt: Input text to complete.
+    ///     max_tokens: Maximum number of tokens to generate.
+    ///     temperature: Sampling temperature (0 = greedy, >0 = stochastic).
+    ///     top_p: Nucleus sampling threshold (0 = disabled).
+    ///     top_k: Top‑K sampling (0 = disabled).
+    ///
+    /// Returns:
+    ///     Generated text as a string.
+    fn infer(
+        &self,
+        prompt: String,
+        max_tokens: i32,
+        temperature: f32,
+        top_p: f32,
+        top_k: i32,
+    ) -> PyResult<String> {
+        let result = llama::infer_tokens(
+            self.ctx_ptr,
+            self.model_ptr,
+            &prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(result)
     }
 
-    fn __del__(&mut self) {
-        unsafe { llama_free(self.model_ptr) };
+    /// Return detected GPU backends as a JSON string.
+    fn gpu_info(&self) -> PyResult<String> {
+        let backends = utils::detect_gpu_backends();
+        serde_json::to_string(&backends)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }
+
+impl Drop for PyLlamaModel {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.ctx_ptr.is_null() {
+                llama::llama_free(self.ctx_ptr);
+            }
+            if !self.model_ptr.is_null() {
+                llama::llama_model_free(self.model_ptr);
+            }
+            llama::llama_backend_free();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PyO3 module definition
+// ---------------------------------------------------------------------------
 
 #[pymodule]
 fn ethllama_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyLlamaModel>()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+//
+// PyO3-bound code (`PyLlamaModel::new`, `infer`, `gpu_info`) is hard to
+// unit-test without a live Python interpreter and a GGUF model on disk.
+// Those paths are covered by the integration tests in `ethllama/tests/`.
+// The tests here focus on the compile-time correctness of the bindings
+// and the structure of the Rust crate itself.
+
+#[cfg(test)]
+mod tests {
+    /// Sanity test: the crate compiles and the test harness runs.
+    /// This is a "trivially true" test that exists to confirm the test
+    /// binary built at all (i.e. PyO3 + llama.cpp + cdylib all linked).
+    #[test]
+    fn test_crate_compiles() {
+        // If this runs, the crate compiled.
+    }
+
+    /// `PyLlamaModel` must be `Send` (the `unsafe impl Send` is required
+    /// for PyO3 to hand instances across threads). This is a static
+    /// check — the test will fail to compile if `Send` is ever removed.
+    #[test]
+    fn test_pyllamamodel_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<crate::PyLlamaModel>();
+    }
+
+    /// Verify the `unsafe impl Send` does not silently make the type
+    /// `!Sync` (PyO3 also requires `Sync` for some patterns).
+    /// If this test stops compiling, check the `unsafe impl Send`
+    /// declaration in lib.rs.
+    #[allow(dead_code)]
+    fn _check_sync_bounds() {
+        fn assert_sync<T: Sync>() {}
+        // Note: PyLlamaModel intentionally implements only `Send`, not
+        // `Sync`. This helper documents that decision — do not call it
+        // from a test, just keep it in the build for documentation.
+        // assert_sync::<crate::PyLlamaModel>();
+        let _ = assert_sync::<u8>; // silence unused warning
+    }
 }

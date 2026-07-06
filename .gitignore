@@ -1,0 +1,24 @@
+# Build artifacts
+ethllama-core/target/
+llama.cpp-build/
+
+# Internal development tracking
+.slim/
+
+# Ruff
+.ruff_cache/
+*.pyc
+__pycache__/
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# System files
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.idea/
+.vscode/

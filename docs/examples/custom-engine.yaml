@@ -1,0 +1,15 @@
+name: my-custom-engine
+type: text
+binary: /opt/my-engine/bin/run
+args_template: >
+  {{ binary }} --checkpoint {{ model_path }} --input "{{ prompt }}"
+  {% if temperature %}--temperature {{ temperature }}{% endif %}
+  --num-threads {{ threads }}
+env:
+  MY_ENGINE_HOME: "/opt/my-engine"
+  CUDA_VISIBLE_DEVICES: "0"
+pre_check: "{{ binary }} --help"
+supports_streaming: false
+model_extensions:
+  - .ckpt
+  - .safetensors

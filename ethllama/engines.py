@@ -19,6 +19,7 @@ class EngineConfig:
         self.pre_check = self.config.get("pre_check", "")
         self.supports_streaming = self.config.get("supports_streaming", False)
         self.model_extensions = self.config.get("model_extensions", [])
+        self.default_model = self.config.get("default_model")
 
     def validate(self) -> bool:
         """Check if the engine binary exists and pre_check passes."""

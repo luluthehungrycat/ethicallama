@@ -1,0 +1,79 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ethllama"
+version = "0.1.0"
+description = "ethical, local-only inference wrapper for llama.cpp"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "luluthehungrycat"},
+]
+requires-python = ">=3.10"
+keywords = ["llama", "llama.cpp", "gguf", "inference", "local-llm", "privacy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.0",
+    "tqdm>=4.0",
+    "requests>=2.0",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "pydantic>=2.0"]
+pull = ["huggingface_hub>=0.20"]
+convert = ["torch>=2.0", "transformers>=4.0"]
+all = ["ethllama[api,pull,convert]"]
+
+[project.scripts]
+ethllama = "ethllama.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/ethicallama"
+Repository = "https://github.com/your-org/ethicallama"
+Issues = "https://github.com/your-org/ethicallama/issues"
+Changelog = "https://github.com/your-org/ethicallama/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "ethllama_core._core"
+bindings = "pyo3"
+manifest-path = "ethllama-core/Cargo.toml"
+# python-source deliberately unset so that maturin auto-discovers
+# the ethllama/ package and places the ethllama_core extension
+# at the correct top-level location.
+
+[tool.pytest.ini_options]
+testpaths = ["ethllama/tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q"
+
+[tool.cibuildwheel]
+build = ["cp310-*", "cp311-*", "cp312-*", "cp313-*"]
+skip = ["*-musllinux_i686", "*-manylinux_i686"]
+before-build = "pip install maturin"
+test-requires = "pytest"
+test-command = "pytest {project}/ethllama/tests/ -v --ignore={project}/ethllama/tests/test_integration.py"
+environment = { RUSTFLAGS = "-C link-arg=-fno-omit-frame-pointer", MATH_BACKEND = "openblas" }
+
+[[tool.cibuildwheel.overrides]]
+select = "*-musllinux*"
+environment = { RUSTFLAGS = "-C link-arg=-fno-omit-frame-pointer" }
