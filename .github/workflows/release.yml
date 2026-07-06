@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fno-omit-frame-pointer
   # Manylinux containers run an old glibc, so we pin the toolchain.
-  CIBW_ENVIRONMENT: 'RUSTFLAGS="-C link-arg=-fno-omit-frame-pointer" MATH_BACKEND=openblas'
+  CIBW_ENVIRONMENT: 'RUSTFLAGS="-C link-arg=-fno-omit-frame-pointer" CXXFLAGS="-fpermissive" MATH_BACKEND=openblas PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1'
 
 jobs:
   build_wheels:
