@@ -23,19 +23,17 @@ pub struct GpuInfo {
 
 /// Detect available GPU backends on the system.
 pub fn detect_gpu_backends() -> Vec<GpuInfo> {
-    let mut backends = Vec::with_capacity(4);
-
-    backends.push(check_cuda());
-    backends.push(check_rocm());
-    backends.push(check_vulkan());
-    backends.push(GpuInfo {
-        backend: "cpu".to_string(),
-        available: true,
-        device_count: 1,
-        device_names: vec!["CPU".to_string()],
-    });
-
-    backends
+    vec![
+        check_cuda(),
+        check_rocm(),
+        check_vulkan(),
+        GpuInfo {
+            backend: "cpu".to_string(),
+            available: true,
+            device_count: 1,
+            device_names: vec!["CPU".to_string()],
+        },
+    ]
 }
 
 fn check_cuda() -> GpuInfo {
@@ -67,10 +65,7 @@ fn check_cuda() -> GpuInfo {
 }
 
 fn check_rocm() -> GpuInfo {
-    match Command::new("rocm-smi")
-        .arg("--showproductname")
-        .output()
-    {
+    match Command::new("rocm-smi").arg("--showproductname").output() {
         Ok(output) if output.status.success() => {
             let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -94,10 +89,7 @@ fn check_rocm() -> GpuInfo {
 }
 
 fn check_vulkan() -> GpuInfo {
-    match Command::new("vulkaninfo")
-        .arg("--summary")
-        .output()
-    {
+    match Command::new("vulkaninfo").arg("--summary").output() {
         Ok(output) if output.status.success() => {
             let info = String::from_utf8_lossy(&output.stdout);
             let has_devices = info.contains("GPU") || info.contains("Device");
@@ -123,6 +115,7 @@ fn check_vulkan() -> GpuInfo {
 
 /// Return the name of the best available GPU backend.
 /// Priority: cuda > rocm > vulkan > cpu.
+#[allow(dead_code)]
 pub fn get_best_backend() -> String {
     let backends = detect_gpu_backends();
     for preferred in &["cuda", "rocm", "vulkan"] {
@@ -148,7 +141,10 @@ mod tests {
     fn test_detect_gpu_returns_vec() {
         let backends = detect_gpu_backends();
         // Vec type is enforced by the let-binding; assert non-empty.
-        assert!(!backends.is_empty(), "detect_gpu_backends() returned an empty Vec");
+        assert!(
+            !backends.is_empty(),
+            "detect_gpu_backends() returned an empty Vec"
+        );
         // All entries should be one of the known backends.
         for backend in &backends {
             assert!(
@@ -238,9 +234,7 @@ mod tests {
         let best = get_best_backend();
         if best != "cpu" {
             assert!(
-                backends
-                    .iter()
-                    .any(|b| b.backend == best && b.available),
+                backends.iter().any(|b| b.backend == best && b.available),
                 "get_best_backend() returned {} but it's not in the available list",
                 best
             );
@@ -262,8 +256,7 @@ mod tests {
         assert!(json.contains("\"available\":true"));
         assert!(json.contains("\"device_count\":1"));
         // Round-trip
-        let parsed: GpuInfo =
-            serde_json::from_str(&json).expect("GpuInfo should deserialize");
+        let parsed: GpuInfo = serde_json::from_str(&json).expect("GpuInfo should deserialize");
         assert_eq!(parsed.backend, info.backend);
         assert_eq!(parsed.device_count, info.device_count);
     }

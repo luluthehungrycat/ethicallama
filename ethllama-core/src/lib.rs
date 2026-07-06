@@ -3,6 +3,13 @@
 // Python bindings (via PyO3) to the llama.cpp FFI layer.
 // Provides a PyLlamaModel class that loads a GGUF model and runs inference.
 
+// The `non_local_definitions` lint fires inside pyo3 0.20's
+// `#[pymethods]` macro with rustc 1.80+.  This is a known false
+// positive (https://github.com/PyO3/pyo3/issues/3745).  The
+// crate-level allow is required because the lint fires during
+// macro expansion before a block-level `#[allow]` takes effect.
+#![allow(non_local_definitions)]
+
 mod llama;
 mod utils;
 
@@ -31,17 +38,12 @@ impl PyLlamaModel {
     ///     n_ctx: Context size in tokens.
     ///     n_threads: Number of CPU threads to use.
     #[new]
-    fn new(
-        path: String,
-        n_gpu_layers: i32,
-        n_ctx: u32,
-        n_threads: i32,
-    ) -> PyResult<Self> {
+    fn new(path: String, n_gpu_layers: i32, n_ctx: u32, n_threads: i32) -> PyResult<Self> {
         // Initialize the llama backend once
         unsafe { llama::llama_backend_init() };
 
-        let (model_ptr, ctx_ptr) =
-            llama::load_model(&path, n_gpu_layers, n_ctx, n_threads).map_err(|e| {
+        let (model_ptr, ctx_ptr) = llama::load_model(&path, n_gpu_layers, n_ctx, n_threads)
+            .map_err(|e| {
                 unsafe { llama::llama_backend_free() };
                 pyo3::exceptions::PyRuntimeError::new_err(e)
             })?;
@@ -77,7 +79,7 @@ impl PyLlamaModel {
             top_p,
             top_k,
         )
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(result)
     }
 

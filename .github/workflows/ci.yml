@@ -72,10 +72,10 @@ jobs:
 
       - name: Build Rust extension and install package
         run: |
-          # maturin reads pyproject.toml from the project root, which now lives at
-          # the repo root. --release gives an optimised cdylib; --uv is the noop
-          # form when uv isn't on PATH (pip is used instead).
-          maturin develop --release --uv
+          # Build wheel with maturin, then pip-install it.
+          # Can't use 'maturin develop' here because there's no virtualenv.
+          maturin build --release --out dist
+          pip install dist/*.whl
 
       - name: Run Python tests
         run: pytest ethllama/tests/ -v

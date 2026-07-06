@@ -112,9 +112,7 @@ pub struct llama_model_params {
     pub main_gpu: i32,
     // 4 bytes implicit padding for ptr alignment on 64-bit
     pub tensor_split: *const f32,
-    pub progress_callback: Option<
-        unsafe extern "C" fn(f32, *mut std::ffi::c_void) -> bool,
-    >,
+    pub progress_callback: Option<unsafe extern "C" fn(f32, *mut std::ffi::c_void) -> bool>,
     pub progress_callback_user_data: *mut std::ffi::c_void,
     pub kv_overrides: *const llama_model_kv_override,
     // booleans packed at the end
@@ -274,10 +272,7 @@ extern "C" {
     // Vocab info / special tokens
     pub fn llama_vocab_bos(vocab: *const llama_vocab) -> llama_token;
     pub fn llama_vocab_eos(vocab: *const llama_vocab) -> llama_token;
-    pub fn llama_vocab_is_eog(
-        vocab: *const llama_vocab,
-        token: llama_token,
-    ) -> bool;
+    pub fn llama_vocab_is_eog(vocab: *const llama_vocab, token: llama_token) -> bool;
 
     // Tokenization
     pub fn llama_tokenize(
@@ -309,12 +304,8 @@ extern "C" {
         model: *mut llama_model,
         params: llama_context_params,
     ) -> *mut llama_context;
-    pub fn llama_model_get_vocab_safe(
-        model: *const llama_model,
-    ) -> *const llama_vocab;
-    pub fn llama_model_n_embd_safe(
-        model: *const llama_model,
-    ) -> i32;
+    pub fn llama_model_get_vocab_safe(model: *const llama_model) -> *const llama_vocab;
+    pub fn llama_model_n_embd_safe(model: *const llama_model) -> i32;
     pub fn llama_tokenize_safe(
         vocab: *const llama_vocab,
         text: *const c_char,
@@ -332,68 +323,38 @@ extern "C" {
         lstrip: i32,
         special: bool,
     ) -> i32;
-    pub fn llama_batch_get_one_safe(
-        tokens: *mut llama_token,
-        n_tokens: i32,
-    ) -> llama_batch;
-    pub fn llama_decode_safe(
-        ctx: *mut llama_context,
-        batch: llama_batch,
-    ) -> i32;
+    pub fn llama_batch_get_one_safe(tokens: *mut llama_token, n_tokens: i32) -> llama_batch;
+    pub fn llama_decode_safe(ctx: *mut llama_context, batch: llama_batch) -> i32;
     pub fn llama_sampler_sample_safe(
         smpl: *mut llama_sampler,
         ctx: *mut llama_context,
         idx: i32,
     ) -> llama_token;
-    pub fn llama_vocab_is_eog_safe(
-        vocab: *const llama_vocab,
-        token: llama_token,
-    ) -> bool;
+    pub fn llama_vocab_is_eog_safe(vocab: *const llama_vocab, token: llama_token) -> bool;
 
     // Batch helper (safe version used via llama_batch_get_one_safe)
-    pub fn llama_batch_get_one(
-        tokens: *mut llama_token,
-        n_tokens: i32,
-    ) -> llama_batch;
+    pub fn llama_batch_get_one(tokens: *mut llama_token, n_tokens: i32) -> llama_batch;
 
-    pub fn llama_batch_init(
-        n_tokens: i32,
-        embd: i32,
-        n_seq_max: i32,
-    ) -> llama_batch;
+    pub fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) -> llama_batch;
 
     pub fn llama_batch_free(batch: llama_batch);
 
     // Decode
-    pub fn llama_decode(
-        ctx: *mut llama_context,
-        batch: llama_batch,
-    ) -> i32;
+    pub fn llama_decode(ctx: *mut llama_context, batch: llama_batch) -> i32;
 
     // Logits
-    pub fn llama_get_logits_ith(
-        ctx: *mut llama_context,
-        i: i32,
-    ) -> *mut f32;
+    pub fn llama_get_logits_ith(ctx: *mut llama_context, i: i32) -> *mut f32;
 
     // Sampler chain
-    pub fn llama_sampler_chain_init(
-        params: llama_sampler_chain_params,
-    ) -> *mut llama_sampler;
+    pub fn llama_sampler_chain_init(params: llama_sampler_chain_params) -> *mut llama_sampler;
 
-    pub fn llama_sampler_chain_add(
-        chain: *mut llama_sampler,
-        smpl: *mut llama_sampler,
-    );
+    pub fn llama_sampler_chain_add(chain: *mut llama_sampler, smpl: *mut llama_sampler);
 
     // Sampler constructors
     pub fn llama_sampler_init_greedy() -> *mut llama_sampler;
     pub fn llama_sampler_init_dist(seed: u32) -> *mut llama_sampler;
     pub fn llama_sampler_init_top_k(k: i32) -> *mut llama_sampler;
-    pub fn llama_sampler_init_top_p(
-        p: f32,
-        min_keep: usize,
-    ) -> *mut llama_sampler;
+    pub fn llama_sampler_init_top_p(p: f32, min_keep: usize) -> *mut llama_sampler;
     pub fn llama_sampler_init_temp(t: f32) -> *mut llama_sampler;
 
     // Sample
@@ -408,11 +369,7 @@ extern "C" {
 
     // Context info
     pub fn llama_n_ctx(ctx: *const llama_context) -> u32;
-    pub fn llama_set_n_threads(
-        ctx: *mut llama_context,
-        n_threads: i32,
-        n_threads_batch: i32,
-    );
+    pub fn llama_set_n_threads(ctx: *mut llama_context, n_threads: i32, n_threads_batch: i32);
 
     // System info
     pub fn llama_print_system_info() -> *const c_char;
@@ -435,13 +392,9 @@ pub fn load_model(
     let mut model_params = unsafe { llama_model_default_params() };
     model_params.n_gpu_layers = n_gpu_layers;
 
-    let model_ptr =
-        unsafe { llama_model_load_from_file_safe(c_path.as_ptr(), model_params) };
+    let model_ptr = unsafe { llama_model_load_from_file_safe(c_path.as_ptr(), model_params) };
     if model_ptr.is_null() {
-        return Err(
-            "Failed to load model: llama_model_load_from_file returned NULL"
-                .to_string(),
-        );
+        return Err("Failed to load model: llama_model_load_from_file returned NULL".to_string());
     }
 
     let mut ctx_params = unsafe { llama_context_default_params() };
@@ -452,10 +405,7 @@ pub fn load_model(
     let ctx_ptr = unsafe { llama_init_from_model_safe(model_ptr, ctx_params) };
     if ctx_ptr.is_null() {
         unsafe { llama_model_free(model_ptr) };
-        return Err(
-            "Failed to create context: llama_init_from_model returned NULL"
-                .to_string(),
-        );
+        return Err("Failed to create context: llama_init_from_model returned NULL".to_string());
     }
 
     Ok((model_ptr, ctx_ptr))
@@ -542,10 +492,7 @@ pub fn tokenize(
             tokens.truncate(n as usize);
             return Ok(tokens);
         }
-        return Err(format!(
-            "Tokenization failed (size query): {}",
-            n_needed
-        ));
+        return Err(format!("Tokenization failed (size query): {}", n_needed));
     }
 
     let n_tokens = n_needed as usize;
@@ -571,10 +518,7 @@ pub fn tokenize(
 // ---------------------------------------------------------------------------
 // Detokenization helper
 // ---------------------------------------------------------------------------
-pub fn detokenize(
-    vocab: *const llama_vocab,
-    tokens: &[llama_token],
-) -> Result<String, String> {
+pub fn detokenize(vocab: *const llama_vocab, tokens: &[llama_token]) -> Result<String, String> {
     let mut output = String::new();
     let mut buf = vec![0u8; 256];
 
@@ -591,9 +535,7 @@ pub fn detokenize(
         };
 
         if n_chars > 0 {
-            output.push_str(&String::from_utf8_lossy(
-                &buf[..n_chars as usize],
-            ));
+            output.push_str(&String::from_utf8_lossy(&buf[..n_chars as usize]));
         }
     }
 
@@ -629,9 +571,8 @@ pub fn infer_tokens(
 
     // 2. Process prompt tokens (prefill)
     let mut prompt_tokens = tokens;
-    let batch = unsafe {
-        llama_batch_get_one_safe(prompt_tokens.as_mut_ptr(), prompt_tokens.len() as i32)
-    };
+    let batch =
+        unsafe { llama_batch_get_one_safe(prompt_tokens.as_mut_ptr(), prompt_tokens.len() as i32) };
     let ret = unsafe { llama_decode_safe(ctx, batch) };
     if ret != 0 {
         return Err(format!("llama_decode (prompt) failed with code: {}", ret));
@@ -648,18 +589,9 @@ pub fn infer_tokens(
         // Stochastic sampling chain: top_k -> top_p -> temperature -> dist
         unsafe {
             llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
-            llama_sampler_chain_add(
-                sampler,
-                llama_sampler_init_top_p(top_p, 1),
-            );
-            llama_sampler_chain_add(
-                sampler,
-                llama_sampler_init_temp(temperature),
-            );
-            llama_sampler_chain_add(
-                sampler,
-                llama_sampler_init_dist(LLAMA_DEFAULT_SEED),
-            );
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
         }
     } else {
         // Greedy: pick the token with highest logit
@@ -726,10 +658,8 @@ mod tests {
             llama_context_default_params;
         let _default_sampler: unsafe extern "C" fn() -> llama_sampler_chain_params =
             llama_sampler_chain_default_params;
-        let _load: unsafe extern "C" fn(
-            *const c_char,
-            llama_model_params,
-        ) -> *mut llama_model = llama_model_load_from_file;
+        let _load: unsafe extern "C" fn(*const c_char, llama_model_params) -> *mut llama_model =
+            llama_model_load_from_file;
         let _init_from_model: unsafe extern "C" fn(
             *mut llama_model,
             llama_context_params,
@@ -743,15 +673,15 @@ mod tests {
             bool,
             bool,
         ) -> i32 = llama_tokenize;
-        let _decode: unsafe extern "C" fn(*mut llama_context, llama_batch) -> i32 =
-            llama_decode;
+        let _decode: unsafe extern "C" fn(*mut llama_context, llama_batch) -> i32 = llama_decode;
         let _sampler_sample: unsafe extern "C" fn(
             *mut llama_sampler,
             *mut llama_context,
             i32,
         ) -> llama_token = llama_sampler_sample;
-        let _sampler_chain_init: unsafe extern "C" fn(llama_sampler_chain_params) -> *mut llama_sampler =
-            llama_sampler_chain_init;
+        let _sampler_chain_init: unsafe extern "C" fn(
+            llama_sampler_chain_params,
+        ) -> *mut llama_sampler = llama_sampler_chain_init;
         let _sampler_init_greedy: unsafe extern "C" fn() -> *mut llama_sampler =
             llama_sampler_init_greedy;
     }
@@ -853,9 +783,9 @@ mod tests {
     fn test_load_model_nonexistent_path_returns_err() {
         let result = load_model(
             "/nonexistent/path/to/fake-model.gguf",
-            0,    // n_gpu_layers
-            512,  // n_ctx
-            4,    // n_threads
+            0,   // n_gpu_layers
+            512, // n_ctx
+            4,   // n_threads
         );
         assert!(result.is_err(), "load_model should fail for missing file");
         let err = result.unwrap_err();
@@ -883,11 +813,11 @@ mod tests {
     #[test]
     fn test_infer_tokens_null_pointers_returns_err() {
         let result = infer_tokens(
-            ptr::null_mut(),  // ctx
-            ptr::null_mut(),  // model
+            ptr::null_mut(), // ctx
+            ptr::null_mut(), // model
             "hello",
             16,
-            0.0,  // greedy
+            0.0, // greedy
             0.0,
             0,
         );
@@ -906,7 +836,7 @@ mod tests {
     fn test_infer_tokens_null_ctx_returns_err() {
         let result = infer_tokens(
             ptr::null_mut(),
-            1 as *mut llama_model, // non-null but invalid — must not be dereferenced
+            std::ptr::dangling_mut::<llama_model>(), // non-null but invalid — must not be dereferenced
             "hello",
             16,
             0.0,

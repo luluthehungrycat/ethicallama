@@ -27,7 +27,10 @@ fn main() {
         .define("LLAMA_KOMPUTE", "OFF")
         .build();
 
-    println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dst.join("lib").display()
+    );
     println!("cargo:rustc-link-lib=static=llama");
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
