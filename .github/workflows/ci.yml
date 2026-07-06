@@ -144,9 +144,9 @@ jobs:
             ${{ runner.os }}-cargo-audit-
 
       - name: Run cargo-audit
-        uses: actions-rust-lang/audit-check@v1
-        with:
-          working-directory: ethllama-core
+        run: |
+          cargo install cargo-audit --locked
+          cd ethllama-core && cargo audit
 
   pip_audit:
     name: Security audit (Python deps)
