@@ -47,10 +47,10 @@ all = ["ethicallama[api,pull,convert]"]
 ethllama = "ethllama.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/ethicallama"
-Repository = "https://github.com/your-org/ethicallama"
-Issues = "https://github.com/your-org/ethicallama/issues"
-Changelog = "https://github.com/your-org/ethicallama/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/luluthehungrycat/ethicallama"
+Repository = "https://github.com/luluthehungrycat/ethicallama"
+Issues = "https://github.com/luluthehungrycat/ethicallama/issues"
+Changelog = "https://github.com/luluthehungrycat/ethicallama/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -60,6 +60,7 @@ manifest-path = "ethllama-core/Cargo.toml"
 # python-source deliberately unset so that maturin auto-discovers
 # the ethllama/ package and places the ethllama_core extension
 # at the correct top-level location.
+include = ["LICENSE", "CHANGELOG.md", "CREDITS.md", "AGENTS.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["ethllama/tests"]
