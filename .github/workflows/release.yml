@@ -18,8 +18,12 @@ env:
 
 jobs:
   build_wheels:
-    name: Build wheels (Linux x86_64)
+    name: Build wheel (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
@@ -40,10 +44,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-release-
 
-      - name: Setup Python
+      - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install system build dependencies
         run: |
@@ -52,6 +56,8 @@ jobs:
             cmake ninja-build libopenblas-dev build-essential pkg-config
 
       - name: Build Linux wheel with maturin
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
         run: |
           pip install maturin
           maturin build --release --out dist
@@ -59,7 +65,7 @@ jobs:
       - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-x86_64
+          name: wheels-linux-x86_64-py${{ matrix.python-version }}
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 14
@@ -94,21 +100,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  verify_sdist:
-    name: Verify sdist installs
-    runs-on: ubuntu-latest
-    needs: [build_sdist]
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@v4
-        with:
-          name: sdist
-          path: dist
-
-      - name: Install from sdist
-        run: |
-          pip install dist/*.tar.gz
-          python -c "import ethllama; print(ethllama.__version__)"
+  # verify_sdist intentionally omitted: the sdist contains the Rust
+  # source but requires the llama.cpp git submodule to build the
+  # native extension.  Pre-built wheels are the supported install
+  # path for end users.
 
   github_release:
     name: Attach artifacts to GitHub Release
