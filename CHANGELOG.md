@@ -6,7 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Fixed
+- Wheel now includes `ethllama/` Python package (cli.py, api.py, inference.py,
+  etc.) via explicit maturin `include` globs. The `python-source` setting alone
+  did not bundle the source directory.
+- Rust extension import now tries both `ethllama_core` and
+  `ethllama.ethllama_core` paths for editable install vs. wheel compatibility.
+- Created `ethllama/ethllama_core/__init__.py` so maturin has the expected
+  directory structure when `python-source` + `module-name` are used.
+
+## [0.1.0] - 2026-07-07
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing
   Python 3.10 – 3.13 on `ubuntu-latest` (Rust + Python, with rustfmt/clippy lint job).
 - GitHub Actions release workflow (`.github/workflows/release.yml`) that builds
