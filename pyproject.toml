@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "ethllama"
+name = "ethicallama"
 version = "0.1.0"
 description = "ethical, local-only inference wrapper for llama.cpp"
 readme = "README.md"
@@ -41,7 +41,7 @@ dependencies = [
 api = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "pydantic>=2.0"]
 pull = ["huggingface_hub>=0.20"]
 convert = ["torch>=2.0", "transformers>=4.0"]
-all = ["ethllama[api,pull,convert]"]
+all = ["ethicallama[api,pull,convert]"]
 
 [project.scripts]
 ethllama = "ethllama.cli:main"
