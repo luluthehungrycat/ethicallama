@@ -57,8 +57,14 @@ features = ["pyo3/extension-module"]
 module-name = "ethllama_core._core"
 bindings = "pyo3"
 manifest-path = "ethllama-core/Cargo.toml"
-python-source = "ethllama"
-include = ["LICENSE", "CHANGELOG.md", "CREDITS.md", "AGENTS.md"]
+include = [
+    "ethllama/**/*.py",
+    "ethllama/**/*.yaml",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CREDITS.md",
+    "AGENTS.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["ethllama/tests"]
