@@ -91,12 +91,19 @@ def has_inference_engine() -> bool:
 
 
 def _try_import_py_model() -> Any:
-    """Try to import the Rust PyLlamaModel core (returns None if unavailable)."""
-    try:
-        from ethllama_core import PyLlamaModel  # type: ignore[import-untyped]
-        return PyLlamaModel
-    except (ImportError, AttributeError):
-        return None
+    """Try to import the Rust PyLlamaModel core (returns None if unavailable).
+
+    The Rust extension may be installed as ``ethllama.ethllama_core``
+    (wheel / ``python-source``) or as a top-level ``ethllama_core``
+    (``maturin develop`` / editable install).
+    """
+    for import_path in ("ethllama_core", "ethllama.ethllama_core"):
+        try:
+            mod = __import__(import_path, fromlist=["PyLlamaModel"])
+            return getattr(mod, "PyLlamaModel", None)
+        except (ImportError, AttributeError):
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
