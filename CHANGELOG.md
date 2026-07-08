@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- TTS engine support: `ethllama tts` command synthesizes speech from text.
+  Supports `--voice`, `--speed`, `--play`, `--format` (wav/mp3/ogg/flac).
+  Engine type `tts` in EngineConfig. Mirrors the existing STT pattern.
+  (24 new tests, 134 total.)
+- Per-model configuration aliases: set defaults in `~/.ethllama/config.yaml`
+  under `model_defaults:<model_stem>` for temperature, top_k, n_gpu_layers,
+  gpu_backend, system_prompt, ctx_size, chat_template path. CLI flags take
+  precedence over per-model values. (14 new tests.)
+
+## [0.1.2] - 2026-07-07
 - Configurable binary paths for llama.cpp tools: users can set
   `engines.binary_dir` in `~/.ethllama/config.yaml` or pass
   `--binary-dir /path/to/bin` to `run`, `serve`, and `quantize`
   commands. Binary discovery now checks: runtime override >
   config file > submodule build dir > PATH.
 - `python -m ethllama` support via `__main__.py`.
-
-## [0.1.2] - 2026-07-07
 - Wheel now includes `ethllama/` Python package (cli.py, api.py, inference.py,
   etc.) via explicit maturin `include` globs. The `python-source` setting alone
   did not bundle the source directory.
@@ -117,5 +125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is **off by default**; the only outbound traffic is model
   pulls, and they are user-initiated.
 
-[Unreleased]: https://github.com/your-org/ethicallama/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/your-org/ethicallama/releases/tag/v0.1.0
+[Unreleased]: https://github.com/luluthehungrycat/ethicallama/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.1.2
+[0.1.0]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.1.0

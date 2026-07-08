@@ -25,6 +25,87 @@ def main():
     pass
 
 
+def _load_model_defaults(
+    config: Dict[str, Any],
+    model_stem: str,
+) -> Dict[str, Any]:
+    """Return the per-model config dict for ``model_stem``, or ``{}``.
+
+    The lookup is keyed by the model filename stem (e.g.
+    ``Phi-4-mini-instruct-Q5_K_M`` for ``Phi-4-mini-instruct-Q5_K_M.gguf``).
+    A missing key, missing ``model_defaults`` section, or non-dict value
+    all return an empty dict so callers can blindly use ``.get()``.
+    """
+    defaults = config.get("model_defaults", {})
+    if not isinstance(defaults, dict):
+        return {}
+    entry = defaults.get(model_stem, {})
+    if not isinstance(entry, dict):
+        return {}
+    return entry
+
+
+def _apply_chat_template_and_system(
+    prompt: str,
+    model_path: Optional[str],
+    chat_template_path: Optional[str],
+    system_prompt: Optional[str],
+    explicit_prompt: bool = True,
+) -> str:
+    """Combine a user prompt with a per-model system prompt / chat template.
+
+    If a ``system_prompt`` is set (per-model config), it is prepended as
+    a system message to the user turn.  If a ``chat_template_path`` is
+    set, the result is rendered through that template (Jinja-style).
+    Otherwise, if the model_path GGUF carries a chat template, that
+    one is used.  As a last resort, the prompt is returned unchanged.
+
+    Args:
+        prompt: The user prompt to feed the model.
+        model_path: Resolved path to the GGUF model.
+        chat_template_path: Optional per-model override for the chat
+            template (``model_defaults.<stem>.chat_template``).
+        system_prompt: Optional per-model system prompt
+            (``model_defaults.<stem>.system_prompt``).
+        explicit_prompt: When True the user provided ``--prompt``
+            explicitly and a system prompt is always prepended
+            (rather than replacing the prompt).  When False, an empty
+            ``--prompt`` combined with a system prompt is treated as
+            a system-only message.
+
+    Returns:
+        A formatted prompt string ready to send to the model.
+    """
+    if not (system_prompt or chat_template_path):
+        return prompt
+
+    messages: list = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+
+    if not messages:
+        return prompt
+
+    try:
+        from .inference import format_chat_messages
+        return format_chat_messages(
+            messages,
+            model_path=model_path,
+            chat_template_path=chat_template_path,
+        )
+    except Exception:
+        # If the chat template cannot be applied (e.g. missing file,
+        # bad Jinja, etc.) fall back to the raw prompt so the user
+        # still gets a response.
+        if system_prompt and prompt:
+            return f"{system_prompt}\n\n{prompt}"
+        if system_prompt:
+            return system_prompt
+        return prompt
+
+
 def _simulate_inference(
     prompt: str,
     temperature: float = 0.7,
@@ -534,6 +615,61 @@ def run(
 
     click.echo(f"GPU backend: {gpu_backend}")
 
+    # 2b. Per-model defaults (CLI flag values take precedence).
+    #     Keys in model_defaults are the model filename stems.
+    model_stem = Path(model_path).stem
+    model_cfg = _load_model_defaults(config, model_stem)
+    if model_cfg:
+        click.echo(f"Using per-model config for '{model_stem}'", err=True)
+
+    # CLI flag values are honored if explicitly passed.  Click's
+    # default values (the function's own defaults) act as a sentinel:
+    # if the per-model config also leaves the setting at its default
+    # we use the function default; if the user passes --temperature
+    # 0.3, that value wins; if the per-model config sets temperature
+    # 0.3, it wins when the CLI flag is left at default.  Because
+    # Click always fills in the default for unset flags, we detect
+    # "user did not pass it" by comparing against the click default.
+    cli_defaults = {
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "top_k": 40,
+        "threads": 4,
+        "n_gpu_layers": 0,
+        "gpu_backend": "auto",
+        "max_tokens": 2048,
+    }
+    cli_values = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "threads": threads,
+        "n_gpu_layers": n_gpu_layers,
+        "gpu_backend": gpu_backend,
+        "max_tokens": max_tokens,
+    }
+
+    def _resolve(key: str) -> Any:
+        """Pick per-model default when CLI flag was left at its default."""
+        if key in model_cfg and cli_values[key] == cli_defaults[key]:
+            return model_cfg[key]
+        return cli_values[key]
+
+    effective_temperature = _resolve("temperature")
+    effective_top_p = _resolve("top_p")
+    effective_top_k = _resolve("top_k")
+    effective_n_gpu_layers = _resolve("n_gpu_layers")
+    effective_threads = _resolve("threads")
+    effective_max_tokens = _resolve("max_tokens")
+    # gpu_backend was already resolved to a real backend above, so
+    # fall back to that when the per-model config does not override.
+    effective_gpu_backend = model_cfg.get("gpu_backend", gpu_backend)
+    # ctx_size has no CLI flag yet, so per-model config is the only knob.
+    effective_ctx_size = int(model_cfg.get("ctx_size", 0) or 0)
+    # System prompt and explicit chat template are per-model-only.
+    effective_system_prompt = model_cfg.get("system_prompt", None)
+    effective_chat_template = model_cfg.get("chat_template", None)
+
     # 3. Determine mode: REPL vs one-shot
     #    -i always wins (explicit user intent)
     #    Otherwise enter REPL automatically when no --prompt was given
@@ -546,17 +682,20 @@ def run(
                 "Note: --prompt ignored because --interactive was set.",
                 err=True,
             )
+        # If the per-model config defines a system prompt and the user
+        # did not pass --system, fall back to the per-model value.
+        repl_system = system_prompt or effective_system_prompt
         _run_repl_loop(
             model_path=model_path,
             model_name=os.path.basename(model_path),
-            system_prompt=system_prompt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_tokens,
-            threads=threads,
-            n_gpu_layers=n_gpu_layers,
-            ctx_size=0,
+            system_prompt=repl_system,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            top_k=effective_top_k,
+            max_tokens=effective_max_tokens,
+            threads=effective_threads,
+            n_gpu_layers=effective_n_gpu_layers,
+            ctx_size=effective_ctx_size,
             max_history=max_history,
             prompt_prefix=prompt_prefix,
         )
@@ -589,12 +728,12 @@ def run(
         cmd = engine_config.render_command(
             model_path=model_path,
             prompt=prompt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            threads=threads,
-            n_gpu_layers=n_gpu_layers,
-            gpu_backend=gpu_backend,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            top_k=effective_top_k,
+            threads=effective_threads,
+            n_gpu_layers=effective_n_gpu_layers,
+            gpu_backend=effective_gpu_backend,
             output=output,
         )
 
@@ -631,9 +770,9 @@ def run(
         click.echo("Warning: No inference engine found. Using simulated output.", err=True)
         _simulate_inference(
             prompt=prompt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            top_k=effective_top_k,
             stream=stream,
             output=output,
         )
@@ -641,16 +780,25 @@ def run(
 
     if stream:
         click.echo(f"Streaming output for {model_path} ...")
+        # Apply per-model system prompt and chat template, if any.
+        effective_prompt = _apply_chat_template_and_system(
+            prompt=prompt,
+            model_path=model_path,
+            chat_template_path=effective_chat_template,
+            system_prompt=effective_system_prompt,
+            explicit_prompt=True,
+        )
         chunks = []
         for chunk in run_inference_stream(
             model_path=model_path,
-            prompt=prompt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_tokens,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=threads,
+            prompt=effective_prompt,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            top_k=effective_top_k,
+            max_tokens=effective_max_tokens,
+            n_gpu_layers=effective_n_gpu_layers,
+            n_threads=effective_threads,
+            ctx_size=effective_ctx_size,
         ):
             click.echo(chunk, nl=False)
             if output:
@@ -661,15 +809,24 @@ def run(
                 f.write("".join(chunks))
             click.echo(f"Output saved to {output}")
     else:
+        # Apply per-model system prompt and chat template, if any.
+        effective_prompt = _apply_chat_template_and_system(
+            prompt=prompt,
+            model_path=model_path,
+            chat_template_path=effective_chat_template,
+            system_prompt=effective_system_prompt,
+            explicit_prompt=True,
+        )
         result = run_inference(
             model_path=model_path,
-            prompt=prompt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_tokens,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=threads,
+            prompt=effective_prompt,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            top_k=effective_top_k,
+            max_tokens=effective_max_tokens,
+            n_gpu_layers=effective_n_gpu_layers,
+            n_threads=effective_threads,
+            ctx_size=effective_ctx_size,
         )
         click.echo(result)
         if output:
@@ -797,11 +954,9 @@ def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: st
     MODEL is an optional model identifier or path to pre-load at startup.
     """
     from .inference import set_gpu_config, set_binary_config
-    set_gpu_config(n_gpu_layers=n_gpu_layers, gpu_backend=gpu_backend, n_threads=threads)
-    if binary_dir:
-        set_binary_config(binary_dir=binary_dir)
 
-    # Resolve preloaded model: try the index first, then a direct path
+    # Resolve preloaded model BEFORE we apply per-model config so the
+    # model stem is known.
     preloaded_model: Optional[str] = None
     if model:
         preloaded_model = resolve_model_path(model)
@@ -812,6 +967,62 @@ def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: st
                 click.echo(f"Warning: Model '{model}' not found in index and is not a valid path.", err=True)
                 click.echo("The server will start without a pre-loaded model.", err=True)
                 preloaded_model = None
+
+    # Apply per-model defaults for the pre-loaded model, if any.
+    # CLI flag values are honored if explicitly passed (same logic
+    # as in the `run` command); per-model values fill in the rest.
+    cfg_for_serve = load_config()
+    serve_model_cfg: Dict[str, Any] = {}
+    if preloaded_model:
+        serve_model_stem = Path(preloaded_model).stem
+        serve_model_cfg = _load_model_defaults(cfg_for_serve, serve_model_stem)
+        if serve_model_cfg:
+            click.echo(
+                f"Using per-model config for '{serve_model_stem}'", err=True
+            )
+
+    cli_defaults_serve = {
+        "n_gpu_layers": 0,
+        "gpu_backend": "auto",
+        "threads": 4,
+        "ctx_size": 0,
+    }
+    cli_values_serve = {
+        "n_gpu_layers": n_gpu_layers,
+        "gpu_backend": gpu_backend,
+        "threads": threads,
+        "ctx_size": 0,
+    }
+
+    def _resolve_serve(key: str) -> Any:
+        if (
+            key in serve_model_cfg
+            and cli_values_serve[key] == cli_defaults_serve[key]
+        ):
+            return serve_model_cfg[key]
+        return cli_values_serve[key]
+
+    effective_n_gpu_layers = _resolve_serve("n_gpu_layers")
+    effective_threads = _resolve_serve("threads")
+    effective_ctx_size = int(serve_model_cfg.get("ctx_size", 0) or 0)
+    # gpu_backend has the same "auto -> config default" resolution as
+    # in the `run` command.
+    effective_gpu_backend_serve = gpu_backend
+    if effective_gpu_backend_serve == "auto":
+        effective_gpu_backend_serve = cfg_for_serve.get("gpu", {}).get(
+            "backend", "cpu"
+        )
+    if "gpu_backend" in serve_model_cfg:
+        effective_gpu_backend_serve = serve_model_cfg["gpu_backend"]
+
+    set_gpu_config(
+        n_gpu_layers=effective_n_gpu_layers,
+        gpu_backend=effective_gpu_backend_serve,
+        n_threads=effective_threads,
+        ctx_size=effective_ctx_size,
+    )
+    if binary_dir:
+        set_binary_config(binary_dir=binary_dir)
 
     try:
         from .api import run_server
@@ -1094,14 +1305,16 @@ def _human_size(size_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 # Sidecar subcommand groups
 # ---------------------------------------------------------------------------
-# Management commands (rm, info) live in cli_mgmt.py and STT (transcribe)
-# lives in cli_stt.py. They are wired in here so the main `ethllama` group
-# has a single entrypoint, while the implementations remain decoupled and
-# can be tested in isolation.
+# Management commands (rm, info) live in cli_mgmt.py, STT (transcribe)
+# lives in cli_stt.py, and TTS lives in cli_tts.py. They are wired in here
+# so the main `ethllama` group has a single entrypoint, while the
+# implementations remain decoupled and can be tested in isolation.
 from .cli_mgmt import register_commands as _register_mgmt
 from .cli_stt import register_commands as _register_stt
+from .cli_tts import register_commands as _register_tts
 _register_mgmt(main)
 _register_stt(main)
+_register_tts(main)
 
 
 if __name__ == "__main__":

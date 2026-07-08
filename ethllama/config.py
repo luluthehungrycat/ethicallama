@@ -1,3 +1,40 @@
+"""Configuration loader for ethicallama.
+
+The configuration lives in ``~/.ethllama/config.yaml`` and is loaded
+on-demand via :func:`load_config`.  The :data:`DEFAULT_CONFIG` dict
+below documents the full schema.
+
+Per-model defaults
+------------------
+
+Per-model defaults can be set under the ``model_defaults`` key.  Each
+key is a model filename stem (e.g. ``Qwen3.5-0.8B-UD-IQ2_XXS``) and
+its value is a dict of settings that act as fallbacks for that
+specific model.  Explicit CLI flags always take precedence; the
+per-model values only fill in settings the user did not pass.
+
+Example ``~/.ethllama/config.yaml``::
+
+    # Per-model defaults. Key is the model filename stem (without
+    # extension). Values override CLI defaults but can be overridden
+    # by explicit CLI flags.
+    #
+    # model_defaults:
+    #   Qwen3.5-0.8B-UD-IQ2_XXS:
+    #     temperature: 0.3
+    #     top_k: 20
+    #     n_gpu_layers: -1
+    #     system_prompt: "You are a helpful assistant."
+    #     ctx_size: 4096
+    #   Phi-4-mini-instruct-Q5_K_M:
+    #     temperature: 0.7
+    #     top_k: 40
+    #     n_gpu_layers: 20
+    #     ctx_size: 8192
+    #     gpu_backend: vulkan
+    #     chat_template: /path/to/custom/template.jinja
+"""
+
 import os
 from pathlib import Path
 from typing import Dict, Any
@@ -27,6 +64,11 @@ DEFAULT_CONFIG = {
         "llama_embedding": None,
         "llama_quantize": None,
     },
+    # Per-model defaults. Optional dict mapping model filename stems
+    # (e.g. "Phi-4-mini-instruct-Q5_K_M") to a dict of inference
+    # settings that act as fallbacks for that model. See module
+    # docstring for the supported keys and behaviour.
+    "model_defaults": {},
 }
 
 def load_config() -> Dict[str, Any]:

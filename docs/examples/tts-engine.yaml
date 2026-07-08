@@ -1,0 +1,21 @@
+name: voxtral-tts
+type: tts
+binary: /path/to/voxtral-tts
+# Default model path used when the user does not pass --model on the
+# command line. voxtral-tts also supports a model-less mode (using a
+# built-in voice), in which case this field can be left empty.
+default_model: ~/.ethllama/models/voxtral-tts-mini-q4.gguf
+# args_template is rendered by ethllama.tts.synthesize_speech (which uses
+# its own Jinja2 renderer so TTS-specific context variables like
+# `voice` and `speed` are available in addition to the standard
+# binary/model_path/prompt/output vars).
+args_template: >
+  --input {{ prompt }} --output {{ output }}
+  {% if model_path %}--model {{ model_path }}{% endif %}
+  --voice {{ voice | default('default') }}
+  --speed {{ speed | default(1.0) }}
+env: {}
+pre_check: "{{ binary }} --version 2>&1 | head -1"
+supports_streaming: false
+model_extensions:
+  - .gguf

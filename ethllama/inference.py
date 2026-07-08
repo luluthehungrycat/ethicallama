@@ -749,16 +749,38 @@ def _render_chat_template(template: str, messages: list) -> str:
 def format_chat_messages(
     messages: list,
     model_path: Optional[str] = None,
+    chat_template_path: Optional[str] = None,
 ) -> str:
     """Format a list of ``{role, content}`` dicts into a prompt string.
 
-    If ``model_path`` is given and the GGUF file contains a
-    ``tokenizer.chat_template`` metadata entry, that template is used
-    (with ``{{ .Prompt }}`` / ``{{ .System }}`` / ``{{ .Response }}``
-    placeholders substituted in).  Otherwise this falls back to a
-    hardcoded ``<|im_start|>`` role-header format compatible with
-    most instruct-tuned models.
+    Resolution order for the chat template:
+
+    1. If ``chat_template_path`` is provided and points to a readable
+       file, the file content is loaded as a Jinja-style template and
+       used.  This is the highest-priority override and lets users
+       ship a hand-written ``template.jinja`` per model.
+    2. Else if ``model_path`` is given and the GGUF file contains a
+       ``tokenizer.chat_template`` metadata entry, that template is
+       used (with ``{{ .Prompt }}`` / ``{{ .System }}`` / ``{{
+       .Response }}`` placeholders substituted in).
+    3. Otherwise this falls back to a hardcoded ``<|im_start|>``
+       role-header format compatible with most instruct-tuned models.
+
+    A missing or unreadable ``chat_template_path`` file is not an
+    error; the function simply falls through to the next option.
     """
+    # 1. Explicit chat template file override
+    if chat_template_path is not None:
+        try:
+            with open(chat_template_path, "r", encoding="utf-8") as _f:
+                _explicit_template = _f.read()
+            if _explicit_template.strip():
+                return _render_chat_template(_explicit_template, messages)
+        except (OSError, UnicodeDecodeError):
+            # File missing / unreadable -> fall through to GGUF / fallback
+            pass
+
+    # 2. Template baked into the GGUF model file
     if model_path is not None:
         template = read_chat_template(model_path)
         if template:
