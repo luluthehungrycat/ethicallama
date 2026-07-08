@@ -1,0 +1,20 @@
+name: llama-tts
+type: tts
+# llama.cpp ships TTS as a sub-mode of llama-cli (--tts flag), so we
+# point `binary` at the same llama-cli executable used for text
+# inference. The args_template below flips it into TTS mode.
+binary: /path/to/llama-cli
+default_model: ~/.ethllama/models/llama-tts-q4.gguf
+# The TTS sub-mode uses the standard llama.cpp short flags:
+#   -m <model>   model file
+#   -p <text>    prompt / text to speak
+#   -o <output>  output wav file
+args_template: >
+  --tts -m {{ model_path }} -p "{{ prompt }}" -o {{ output }}
+  {% if voice %}--voice {{ voice }}{% endif %}
+env:
+  GGML_CPU_ALL_THREADS: "1"
+pre_check: "{{ binary }} --version"
+supports_streaming: false
+model_extensions:
+  - .gguf

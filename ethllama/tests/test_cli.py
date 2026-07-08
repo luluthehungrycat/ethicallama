@@ -1007,3 +1007,402 @@ def test_format_chat_messages_template_with_system_and_response():
         assert "Hello!" in out
     finally:
         os.unlink(path)
+
+
+
+# ---------------------------------------------------------------------------
+# Per-model config (model_defaults in config.yaml)
+# ---------------------------------------------------------------------------
+
+
+def _isolated_config(monkeypatch, cfg: dict):
+    """Patch ethllama.cli.load_config to return a custom config.
+
+    Also patches ethllama.config.load_config (used by other modules
+    that may lazily load) so the test sees a single consistent view.
+    """
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+    monkeypatch.setattr(cli_mod, "load_config", lambda: cfg)
+    monkeypatch.setattr(config_mod, "load_config", lambda: cfg)
+
+
+def _isolate_index(monkeypatch, tmp_path):
+    """Redirect the model index file to a tmp path so resolve_model_path
+    can never accidentally find a real indexed model."""
+    from ethllama import index as index_mod
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+
+
+def test_load_model_defaults_returns_empty_for_unknown_stem():
+    """_load_model_defaults returns {} when the model stem is not configured."""
+    import ethllama.cli as cli_mod
+    cfg = {"model_defaults": {"known-model": {"temperature": 0.1}}}
+    assert cli_mod._load_model_defaults(cfg, "unknown-model") == {}
+
+
+def test_load_model_defaults_returns_entry_for_known_stem():
+    """_load_model_defaults returns the configured dict for a known stem."""
+    import ethllama.cli as cli_mod
+    cfg = {"model_defaults": {"phi-4": {"temperature": 0.42, "top_k": 12}}}
+    out = cli_mod._load_model_defaults(cfg, "phi-4")
+    assert out == {"temperature": 0.42, "top_k": 12}
+
+
+def test_load_model_defaults_handles_missing_section():
+    """_load_model_defaults returns {} when model_defaults is absent."""
+    import ethllama.cli as cli_mod
+    assert cli_mod._load_model_defaults({}, "anything") == {}
+
+
+def test_load_model_defaults_handles_non_dict_section():
+    """_load_model_defaults returns {} when model_defaults is not a dict."""
+    import ethllama.cli as cli_mod
+    assert cli_mod._load_model_defaults({"model_defaults": []}, "x") == {}
+
+
+def test_load_model_defaults_handles_non_dict_entry():
+    """_load_model_defaults returns {} when the entry is not a dict."""
+    import ethllama.cli as cli_mod
+    cfg = {"model_defaults": {"phi-4": "this is not a dict"}}
+    assert cli_mod._load_model_defaults(cfg, "phi-4") == {}
+
+
+def test_per_model_config_applied_in_run(tmp_path, monkeypatch):
+    """`ethllama run` picks up model_defaults for the resolved model stem.
+
+    Verifies the verbose log line and that the effective inference
+    call receives the per-model temperature (not the CLI default).
+    """
+    from ethllama import index as index_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    # Build a model with a known stem
+    model_name = "phi-4-mini-test"
+    model_path = tmp_path / f"{model_name}.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    # Config with per-model defaults
+    cfg = {
+        "gpu": {"backend": "cpu", "fallback": True},
+        "model_defaults": {
+            model_name: {
+                "temperature": 0.25,
+                "top_k": 12,
+                "top_p": 0.7,
+                "n_gpu_layers": 99,
+                "system_prompt": "You are concise.",
+            }
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    # Patch inference so we capture the call (and don't need a real engine)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "ethllama.inference.has_inference_engine", lambda: True
+    )
+
+    def fake_run_inference(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("ethllama.inference.run_inference", fake_run_inference)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hello"]
+    )
+
+    # The CLI should have applied the per-model config
+    assert result.exit_code == 0, result.output
+    assert captured, f"run_inference was not called. output={result.output!r}"
+    assert captured["temperature"] == 0.25
+    assert captured["top_k"] == 12
+    assert captured["top_p"] == 0.7
+    assert captured["n_gpu_layers"] == 99
+    # The verbose log line should be on stderr
+    assert "per-model config" in result.output
+    # And the system prompt should have been prepended to the user prompt
+    assert "You are concise." in captured["prompt"]
+    assert "Hello" in captured["prompt"]
+
+
+def test_cli_flag_overrides_per_model_default(tmp_path, monkeypatch):
+    """Explicit CLI flags (e.g. --temperature) take precedence over
+    the value configured in model_defaults."""
+    from ethllama import index as index_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    model_name = "phi-4-cli-override"
+    model_path = tmp_path / f"{model_name}.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    cfg = {
+        "gpu": {"backend": "cpu", "fallback": True},
+        "model_defaults": {
+            model_name: {
+                "temperature": 0.25,
+                "top_k": 12,
+                "n_gpu_layers": 99,
+            }
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "ethllama.inference.has_inference_engine", lambda: True
+    )
+    monkeypatch.setattr(
+        "ethllama.inference.run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    # User explicitly passes --temperature 0.9; top_k and n_gpu_layers
+    # are left at CLI defaults so the per-model values should win for those.
+    result = runner.invoke(
+        main,
+        ["run", str(model_path), "-p", "Hi", "--temperature", "0.9"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["temperature"] == 0.9, (
+        "Explicit --temperature must override per-model default; "
+        f"got {captured.get('temperature')!r}"
+    )
+    # top_k and n_gpu_layers were not given on CLI, so per-model wins
+    assert captured["top_k"] == 12
+    assert captured["n_gpu_layers"] == 99
+
+
+def test_unknown_model_stem_gets_no_defaults(tmp_path, monkeypatch):
+    """When the model stem is not in model_defaults, the CLI flags
+    are used as-is and the verbose per-model log is NOT printed."""
+    from ethllama import index as index_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    model_path = tmp_path / "completely-unknown-model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    cfg = {
+        "gpu": {"backend": "cpu", "fallback": True},
+        "model_defaults": {
+            "some-other-model": {"temperature": 0.1},
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "ethllama.inference.has_inference_engine", lambda: True
+    )
+    monkeypatch.setattr(
+        "ethllama.inference.run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hi"]
+    )
+    assert result.exit_code == 0, result.output
+    # CLI defaults should be in effect (no per-model override)
+    assert captured["temperature"] == 0.7
+    assert captured["top_k"] == 40
+    # The per-model verbose log should NOT appear
+    assert "per-model config" not in result.output
+
+
+def test_per_model_chat_template_file(tmp_path, monkeypatch):
+    """When model_defaults.chat_template points to a file, the
+    inference call uses that template's rendered output."""
+    from ethllama import index as index_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    model_name = "phi-4-with-template"
+    model_path = tmp_path / f"{model_name}.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    template_path = tmp_path / "custom.jinja"
+    template_path.write_text(
+        "SYS:{{ .System }}|USR:{{ .Prompt }}|REPLY:",
+        encoding="utf-8",
+    )
+
+    cfg = {
+        "gpu": {"backend": "cpu", "fallback": True},
+        "model_defaults": {
+            model_name: {
+                "chat_template": str(template_path),
+                "system_prompt": "I am terse.",
+            }
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "ethllama.inference.has_inference_engine", lambda: True
+    )
+    monkeypatch.setattr(
+        "ethllama.inference.run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hello there"]
+    )
+    assert result.exit_code == 0, result.output
+    # The template substitutes .System and .Prompt verbatim
+    assert captured["prompt"].startswith("SYS:I am terse.|USR:Hello there|REPLY:")
+
+
+def test_per_model_config_does_not_apply_when_stem_differs(tmp_path, monkeypatch):
+    """Per-model defaults are only used when the model stem matches
+    exactly.  Similar-but-different stems must NOT inherit settings."""
+    from ethllama import index as index_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    # Create a model whose stem does NOT match the configured key
+    model_path = tmp_path / "qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    cfg = {
+        "gpu": {"backend": "cpu", "fallback": True},
+        "model_defaults": {
+            "qwen2.5-7B-Instruct-Q5_K_M": {  # note: Q5, not Q4
+                "temperature": 0.11,
+            }
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "ethllama.inference.has_inference_engine", lambda: True
+    )
+    monkeypatch.setattr(
+        "ethllama.inference.run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hi"]
+    )
+    assert result.exit_code == 0, result.output
+    # No per-model default for this exact stem -> CLI default wins
+    assert captured["temperature"] == 0.7
+    assert "per-model config" not in result.output
+
+
+def test_format_chat_messages_with_template_path_file(tmp_path):
+    """format_chat_messages reads the template from chat_template_path
+    when given a path to a real file."""
+    template_path = tmp_path / "tpl.jinja"
+    template_path.write_text("[INST] {{ .Prompt }} [/INST]", encoding="utf-8")
+    out = format_chat_messages(
+        [{"role": "user", "content": "Hello"}],
+        chat_template_path=str(template_path),
+    )
+    assert out == "[INST] Hello [/INST]"
+
+
+def test_format_chat_messages_template_path_falls_back_on_missing_file(tmp_path):
+    """A missing chat_template_path file should not crash; the function
+    falls through to the GGUF template or the hardcoded format."""
+    missing = tmp_path / "does-not-exist.jinja"
+    # No model_path, no working template -> hardcoded fallback
+    out = format_chat_messages(
+        [{"role": "user", "content": "Hello"}],
+        chat_template_path=str(missing),
+    )
+    assert "<|im_start|>" in out
+    assert "Hello" in out
+
+
+def test_format_chat_messages_template_path_takes_precedence_over_gguf(tmp_path):
+    """The explicit chat_template_path wins over the GGUF-baked template."""
+    # Build a GGUF with one template
+    gguf_template = "GGUF:{{ .Prompt }}"
+    blob = _build_minimal_gguf(
+        [("tokenizer.chat_template", 8, _gguf_string_payload(gguf_template))]
+    )
+    gguf_path = tmp_path / "m.gguf"
+    gguf_path.write_bytes(blob)
+
+    # And a file-based template that should win
+    file_template = tmp_path / "explicit.jinja"
+    file_template.write_text("FILE:{{ .Prompt }}", encoding="utf-8")
+
+    out = format_chat_messages(
+        [{"role": "user", "content": "Hi"}],
+        model_path=str(gguf_path),
+        chat_template_path=str(file_template),
+    )
+    assert out == "FILE:Hi"
+    assert "GGUF:" not in out
+
+
+def test_serve_applies_per_model_config(tmp_path, monkeypatch):
+    """`ethllama serve --model <m>` with a per-model config in
+    config.yaml propagates n_gpu_layers / n_threads / gpu_backend to
+    set_gpu_config()."""
+    from ethllama import index as index_mod
+    import ethllama.inference as inf_mod
+    _isolate_index(monkeypatch, tmp_path)
+
+    model_name = "phi-4-serve-test"
+    model_path = tmp_path / f"{model_name}.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    cfg = {
+        "gpu": {"backend": "vulkan", "fallback": True},
+        "model_defaults": {
+            model_name: {
+                "n_gpu_layers": 42,
+                "threads": 7,
+                "gpu_backend": "cuda",
+                "ctx_size": 2048,
+            }
+        },
+    }
+    _isolated_config(monkeypatch, cfg)
+
+    captured_gpu: dict = {}
+    monkeypatch.setattr(
+        inf_mod, "set_gpu_config", lambda **kw: captured_gpu.update(kw)
+    )
+
+    captured_serve: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured_serve.update(kwargs)
+        raise KeyboardInterrupt()
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        mod = real_import(name, *a, **kw)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server  # type: ignore[attr-defined]
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr("ethllama.cli.resolve_model_path", lambda _m: str(model_path))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["serve", "--model", str(model_path), "--host", "127.0.0.1", "--port", "1"]
+    )
+
+    # set_gpu_config was called with the per-model values
+    assert captured_gpu.get("n_gpu_layers") == 42
+    assert captured_gpu.get("n_threads") == 7
+    assert captured_gpu.get("gpu_backend") == "cuda"
+    assert captured_gpu.get("ctx_size") == 2048
+    # And the model is forwarded to run_server
+    assert captured_serve.get("model_path") == str(model_path)
