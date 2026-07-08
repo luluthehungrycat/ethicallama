@@ -6,7 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
+- Configurable binary paths for llama.cpp tools: users can set
+  `engines.binary_dir` in `~/.ethllama/config.yaml` or pass
+  `--binary-dir /path/to/bin` to `run`, `serve`, and `quantize`
+  commands. Binary discovery now checks: runtime override >
+  config file > submodule build dir > PATH.
+- `python -m ethllama` support via `__main__.py`.
+
+## [0.1.2] - 2026-07-07
 - Wheel now includes `ethllama/` Python package (cli.py, api.py, inference.py,
   etc.) via explicit maturin `include` globs. The `python-source` setting alone
   did not bundle the source directory.

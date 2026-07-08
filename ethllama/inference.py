@@ -7,6 +7,7 @@ tokenizer bug is resolved for the given model.
 """
 
 import json
+import os
 import re
 import struct
 import shutil
@@ -48,6 +49,40 @@ def get_gpu_config() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Runtime binary configuration (paths to llama.cpp tool binaries)
+# ---------------------------------------------------------------------------
+
+_BINARY_CONFIG: Dict[str, Any] = {
+    "binary_dir": None,       # directory containing llama-cli, llama-embedding, etc.
+    "llama_cli": None,        # explicit path to llama-cli binary
+    "llama_embedding": None,  # explicit path to llama-embedding
+    "llama_quantize": None,   # explicit path to llama-quantize
+}
+
+
+def set_binary_config(
+    binary_dir: Optional[str] = None,
+    llama_cli: Optional[str] = None,
+    llama_embedding: Optional[str] = None,
+    llama_quantize: Optional[str] = None,
+) -> None:
+    """Set runtime binary overrides."""
+    if binary_dir is not None:
+        _BINARY_CONFIG["binary_dir"] = binary_dir
+    if llama_cli is not None:
+        _BINARY_CONFIG["llama_cli"] = llama_cli
+    if llama_embedding is not None:
+        _BINARY_CONFIG["llama_embedding"] = llama_embedding
+    if llama_quantize is not None:
+        _BINARY_CONFIG["llama_quantize"] = llama_quantize
+
+
+def get_binary_config() -> Dict[str, Any]:
+    """Return a copy of the current binary configuration."""
+    return dict(_BINARY_CONFIG)
+
+
+# ---------------------------------------------------------------------------
 # Binary discovery
 # ---------------------------------------------------------------------------
 
@@ -55,14 +90,58 @@ def find_binary(name: str = "llama-cli") -> Optional[str]:
     """Locate a llama.cpp tool binary.
 
     Checks, in order:
-    1. Built from submodule at ``llama.cpp-build/bin/<name>``
-    2. System PATH via ``shutil.which``
+    1. Runtime override via ``set_binary_config()`` (for the specific binary name)
+    2. ``binary_dir`` from runtime overrides (``<binary_dir>/<name>``)
+    3. Config file ``engines.binary_dir`` (via load_config)
+    4. Built from submodule at ``llama.cpp-build/bin/<name>``
+    5. System PATH via ``shutil.which``
 
     Returns an absolute path, or *None* if not found.
     """
+    # Map generic name to config key
+    name_to_key = {
+        "llama-cli": "llama_cli",
+        "llama-embedding": "llama_embedding",
+        "llama-quantize": "llama_quantize",
+    }
+    key = name_to_key.get(name)
+
+    # 1. Runtime override for this specific binary
+    if key and _BINARY_CONFIG.get(key):
+        path = _BINARY_CONFIG[key]
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+
+    # 2. Runtime binary_dir override
+    binary_dir = _BINARY_CONFIG.get("binary_dir")
+    if binary_dir:
+        candidate = Path(binary_dir) / name
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    # 3. Config file binary_dir (fallback — load_config is lazy)
+    from .config import load_config
+    config = load_config()
+    engines_cfg = config.get("engines", {})
+    if not binary_dir:
+        # Only check config if runtime didn't set it
+        cfg_binary_dir = engines_cfg.get("binary_dir")
+        if cfg_binary_dir:
+            candidate = Path(cfg_binary_dir) / name
+            if candidate.exists():
+                return str(candidate.resolve())
+    # Per-binary paths in config
+    if key and engines_cfg.get(key):
+        path = engines_cfg[key]
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+
+    # 4. Built from submodule
     built = BUILD_BIN_DIR / name
     if built.exists():
         return str(built.resolve())
+
+    # 5. System PATH
     return shutil.which(name)
 
 

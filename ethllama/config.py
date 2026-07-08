@@ -21,6 +21,12 @@ DEFAULT_CONFIG = {
         "enabled": False,
     },
     "model_dirs": [],
+    "engines": {
+        "binary_dir": None,
+        "llama_cli": None,
+        "llama_embedding": None,
+        "llama_quantize": None,
+    },
 }
 
 def load_config() -> Dict[str, Any]:
