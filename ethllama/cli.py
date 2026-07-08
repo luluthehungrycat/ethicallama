@@ -484,6 +484,8 @@ def _run_repl_loop(
               help="Max conversation turns to keep in REPL history")
 @click.option("--system", "system_prompt", default=None, type=str,
               help="Initial system prompt for REPL mode")
+@click.option("--binary-dir", default=None, type=str,
+              help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
 def run(
     model: str,
     prompt: Optional[str],
@@ -501,11 +503,17 @@ def run(
     prompt_prefix: str,
     max_history: int,
     system_prompt: Optional[str],
+    binary_dir: Optional[str],
 ):
     """Run inference with a model.
 
     MODEL is a model filename, path, or identifier from the index.
     """
+    # 0. Apply runtime binary override
+    if binary_dir:
+        from .inference import set_binary_config
+        set_binary_config(binary_dir=binary_dir)
+
     # 1. Resolve model path from index
     model_path = resolve_model_path(model)
     if not model_path:
@@ -780,14 +788,18 @@ def config(do_init: bool):
 @click.option("--threads", default=4, show_default=True, type=int, help="CPU thread count")
 @click.option("--model", "-m", default=None, type=str,
               help="Model identifier or path to pre-load at server startup")
+@click.option("--binary-dir", default=None, type=str,
+              help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
 def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str,
-          threads: int, model: Optional[str]):
+          threads: int, model: Optional[str], binary_dir: Optional[str]):
     """Start the HTTP API server (FastAPI, opt-in).
 
     MODEL is an optional model identifier or path to pre-load at startup.
     """
-    from .inference import set_gpu_config
+    from .inference import set_gpu_config, set_binary_config
     set_gpu_config(n_gpu_layers=n_gpu_layers, gpu_backend=gpu_backend, n_threads=threads)
+    if binary_dir:
+        set_binary_config(binary_dir=binary_dir)
 
     # Resolve preloaded model: try the index first, then a direct path
     preloaded_model: Optional[str] = None
@@ -858,11 +870,20 @@ def engines():
               type=click.Choice(["q4_0", "q4_1", "q4_k_m", "q4_k_s", "q5_0", "q5_1", "q5_k_m", "q5_k_s", "q6_k", "q8_0", "f16"], case_sensitive=False),
               help="Quantization type")
 @click.option("--binary", default=None, type=str, help="Path to llama.cpp quantize binary")
-def quantize(model: str, output: Optional[str], quantize_type: str, binary: Optional[str]):
+@click.option("--binary-dir", default=None, type=str,
+              help="Directory containing llama.cpp binaries (overrides engines.binary_dir)")
+def quantize(model: str, output: Optional[str], quantize_type: str, binary: Optional[str],
+             binary_dir: Optional[str]):
     """Quantize a model to a smaller precision format.
 
     MODEL is a model name (from the index) or a path to a GGUF file.
     """
+    # 0. Apply runtime binary override so find_binary() picks the right
+    #    llama-quantize when the user does not pass --binary explicitly.
+    if binary_dir:
+        from .inference import set_binary_config
+        set_binary_config(binary_dir=binary_dir)
+
     # 1. Resolve model path
     model_path = resolve_model_path(model)
     if not model_path:
