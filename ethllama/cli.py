@@ -13,7 +13,13 @@ import click
 
 from .config import load_config, init_config
 from .index import load_index, add_to_index, resolve_model_path, remove_from_index, find_in_index
-from .engines import load_engines, EngineConfig
+from .engines import (
+    load_engines,
+    EngineConfig,
+    discover_engines,
+    generate_engine_config,
+    KNOWN_ENGINES,
+)
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
@@ -1093,6 +1099,90 @@ def engines():
         click.echo(f"      streaming: {eng.supports_streaming}")
         if eng.model_extensions:
             click.echo(f"      extensions: {', '.join(eng.model_extensions)}")
+
+
+@main.command()
+@click.argument("binary_name", required=False, default=None)
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Overwrite existing engine config YAMLs")
+@click.option("--no-generate", is_flag=True, default=False,
+              help="Only report findings; do not write YAML files")
+@click.option("--engines-dir", default=None, type=click.Path(file_okay=False),
+              help="Override the engines config directory (default: ~/.ethllama/engines/)")
+def discover(binary_name: Optional[str], overwrite: bool, no_generate: bool,
+             engines_dir: Optional[str]):
+    """Scan PATH for known inference engines and generate configs.
+
+    Without arguments, scans for all known engines (ollama, llama-cli,
+    whisper-cli, voxtral, etc.) listed in the KNOWN_ENGINES catalogue.
+    With a specific BINARY_NAME, finds only that binary on PATH (even
+    if it is not in the catalogue — useful for ad-hoc checks).
+
+    For every discovered binary, a corresponding YAML config is written
+    to ~/.ethllama/engines/<name>.yaml using the matching template.  Use
+    ``--no-generate`` to only print findings, or ``--overwrite`` to
+    replace an existing config.
+    """
+    engines_dir_path: Optional[Path] = (
+        Path(engines_dir).expanduser() if engines_dir else None
+    )
+
+    if binary_name is not None:
+        click.echo(f"\U0001f50d Searching for '{binary_name}' on PATH...")
+        found = discover_engines(binary_name=binary_name)
+        if not found:
+            click.echo(f"  \u274c {binary_name}: not found on PATH")
+            sys.exit(1)
+        for name, path in found.items():
+            click.echo(f"  \u2705 {name} -> {path}")
+        if no_generate:
+            return
+        for name, path in found.items():
+            target = generate_engine_config(
+                name, path, engines_dir=engines_dir_path, overwrite=overwrite,
+            )
+            if target is None:
+                click.echo(
+                    f"  \u23ed\ufe0f  Skipped {name}: config already exists "
+                    f"(use --overwrite to replace)"
+                )
+            else:
+                click.echo(f"  \U0001f4dd Generated {target}")
+        return
+
+    # No argument: scan for all known engines
+    click.echo("Scanning PATH for known inference engines...")
+    found = discover_engines()
+    if not found:
+        click.echo("No inference engines found on PATH.")
+        click.echo(
+            f"Known engines: {', '.join(sorted(KNOWN_ENGINES.keys()))}"
+        )
+        return
+
+    click.echo(f"\nFound {len(found)} inference engine(s):\n")
+    for name, path in sorted(found.items()):
+        if no_generate:
+            click.echo(f"  \u2705 {name} -> {path}")
+            continue
+        target = generate_engine_config(
+            name, path, engines_dir=engines_dir_path, overwrite=overwrite,
+        )
+        if target is None:
+            click.echo(
+                f"  \u23ed\ufe0f  {name} -> {path}  "
+                f"(config exists, use --overwrite to replace)"
+            )
+        else:
+            click.echo(f"  \u2705 {name} -> {path}  (generated {target})")
+
+    if not no_generate:
+        click.echo("")
+        click.echo(
+            "Run 'ethllama engines' to see installed engines, or "
+            "'ethllama run <model> --engine <name>' to use one."
+        )
+
 
 
 @main.command()

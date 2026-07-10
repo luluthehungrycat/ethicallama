@@ -1406,3 +1406,275 @@ def test_serve_applies_per_model_config(tmp_path, monkeypatch):
     assert captured_gpu.get("ctx_size") == 2048
     # And the model is forwarded to run_server
     assert captured_serve.get("model_path") == str(model_path)
+
+# ---------------------------------------------------------------------------
+# Engine discovery: `ethllama discover`
+# ---------------------------------------------------------------------------
+
+
+def test_discover_help():
+    """`ethllama discover --help` shows expected options and the help text."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover", "--help"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "PATH" in out
+    assert "--overwrite" in out
+    assert "--no-generate" in out
+    # The help text references the catalogue
+    assert "ollama" in out or "llama-cli" in out
+
+
+def test_discover_appears_in_main_help():
+    """The discover command is listed in the main help output."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "discover" in result.output
+
+
+def test_discover_engines_no_args_no_engines(monkeypatch, tmp_path):
+    """`ethllama discover` with nothing on PATH prints a friendly message."""
+    import ethllama.cli as cli_mod
+
+    # Force discover_engines to return empty (no engines on test PATH)
+    monkeypatch.setattr(
+        cli_mod, "discover_engines", lambda binary_name=None: {}
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "No inference engines found" in out
+    # The message lists known engine names so the user knows what was looked for
+    assert "ollama" in out
+    assert "llama-cli" in out
+
+
+def test_discover_engines_finds_multiple(monkeypatch, tmp_path):
+    """`ethllama discover` reports each found engine and writes a YAML."""
+    import ethllama.cli as cli_mod
+
+    fake_found = {
+        "ollama": "/usr/bin/ollama",
+        "llama-cli": "/usr/local/bin/llama-cli",
+    }
+    generated: list = []
+
+    def fake_discover(binary_name=None):
+        return dict(fake_found)
+
+    def fake_generate(name, path, engines_dir=None, overwrite=False):
+        target = tmp_path / f"{name}.yaml"
+        target.write_text(f"name: {name}\nbinary: {path}\n", encoding="utf-8")
+        generated.append((name, path, str(target)))
+        return target
+
+    monkeypatch.setattr(cli_mod, "discover_engines", fake_discover)
+    monkeypatch.setattr(cli_mod, "generate_engine_config", fake_generate)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Found 2 inference engine" in out
+    assert "ollama" in out
+    assert "/usr/bin/ollama" in out
+    assert "llama-cli" in out
+    # Both YAMLs should have been generated
+    assert len(generated) == 2
+    assert (tmp_path / "ollama.yaml").exists()
+    assert (tmp_path / "llama-cli.yaml").exists()
+
+
+def test_discover_engines_specific_binary_found(monkeypatch, tmp_path):
+    """`ethllama discover <name>` for a found binary reports success."""
+    import ethllama.cli as cli_mod
+
+    def fake_discover(binary_name=None):
+        assert binary_name == "ollama"
+        return {"ollama": "/opt/ollama/bin/ollama"}
+
+    generated: list = []
+    def fake_generate(name, path, engines_dir=None, overwrite=False):
+        target = tmp_path / f"{name}.yaml"
+        target.write_text("name: ollama\n", encoding="utf-8")
+        generated.append(target)
+        return target
+
+    monkeypatch.setattr(cli_mod, "discover_engines", fake_discover)
+    monkeypatch.setattr(cli_mod, "generate_engine_config", fake_generate)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover", "ollama"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Searching for 'ollama'" in out
+    assert "/opt/ollama/bin/ollama" in out
+    # Should have generated exactly one YAML
+    assert len(generated) == 1
+    assert generated[0].name == "ollama.yaml"
+
+
+def test_discover_engines_specific_binary_not_found(monkeypatch):
+    """`ethllama discover <missing>` exits non-zero with a clear message."""
+    import ethllama.cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod, "discover_engines", lambda binary_name=None: {}
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover", "definitely-not-installed"])
+    assert result.exit_code != 0
+    out = result.output
+    assert "Searching for" in out
+    assert "definitely-not-installed" in out
+    assert "not found" in out.lower()
+
+
+def test_discover_no_generate_does_not_write(monkeypatch, tmp_path):
+    """`--no-generate` only reports; generate_engine_config is not called."""
+    import ethllama.cli as cli_mod
+
+    def fake_discover(binary_name=None):
+        return {"llama-cli": "/usr/bin/llama-cli"}
+
+    called = {"n": 0}
+    def fake_generate(*args, **kwargs):
+        called["n"] += 1
+        return tmp_path / "x.yaml"
+
+    monkeypatch.setattr(cli_mod, "discover_engines", fake_discover)
+    monkeypatch.setattr(cli_mod, "generate_engine_config", fake_generate)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["discover", "--no-generate"])
+    assert result.exit_code == 0
+    # No generation should have happened
+    assert called["n"] == 0
+    # But the find should still be reported
+    assert "llama-cli" in result.output
+    assert "/usr/bin/llama-cli" in result.output
+
+
+def test_discover_engines_skips_existing(monkeypatch, tmp_path):
+    """When a YAML already exists and --overwrite is absent, the
+    output marks the entry as 'skipped' (the file is NOT overwritten)."""
+    import ethllama.cli as cli_mod
+
+    # Pre-create a YAML at the target path
+    engines_dir = tmp_path
+    existing = engines_dir / "ollama.yaml"
+    existing.write_text("name: ollama\nbinary: /old/path\n", encoding="utf-8")
+    old_content = existing.read_text()
+
+    def fake_discover(binary_name=None):
+        return {"ollama": "/new/path/ollama"}
+
+    # generate_engine_config returns None when it refuses to overwrite
+    def fake_generate(name, path, engines_dir=None, overwrite=False):
+        return None  # signal "skipped"
+
+    monkeypatch.setattr(cli_mod, "discover_engines", fake_discover)
+    monkeypatch.setattr(cli_mod, "generate_engine_config", fake_generate)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["discover", "--engines-dir", str(engines_dir)]
+    )
+    assert result.exit_code == 0
+    out = result.output
+    assert "ollama" in out
+    # The message announces that the config already exists (skipped)
+    assert "config exists" in out or "exists" in out.lower()
+    # And the existing file was not touched
+    assert existing.read_text() == old_content
+
+
+def test_generate_engine_config_writes_yaml(tmp_path):
+    """generate_engine_config writes a YAML file with the right shape."""
+    from ethllama.engines import generate_engine_config
+
+    target = generate_engine_config(
+        "llama-cli", "/usr/bin/llama-cli", engines_dir=tmp_path,
+    )
+    assert target is not None
+    assert target.exists()
+    assert target.name == "llama-cli.yaml"
+
+    import yaml
+    with open(target) as f:
+        data = yaml.safe_load(f)
+    assert data["name"] == "llama-cli"
+    assert data["type"] == "text"
+    assert data["binary"] == "/usr/bin/llama-cli"
+    # The template should include the model path and prompt variables
+    assert "{{ model_path }}" in data["args_template"]
+    assert "{{ prompt }}" in data["args_template"]
+
+
+def test_generate_engine_config_unknown_binary_uses_defaults(tmp_path):
+    """A binary not in KNOWN_ENGINES still gets a minimal config written."""
+    from ethllama.engines import generate_engine_config
+
+    target = generate_engine_config(
+        "my-custom-engine", "/opt/custom/my-engine", engines_dir=tmp_path,
+    )
+    assert target is not None
+    assert target.exists()
+
+    import yaml
+    with open(target) as f:
+        data = yaml.safe_load(f)
+    assert data["name"] == "my-custom-engine"
+    assert data["binary"] == "/opt/custom/my-engine"
+    # Falls back to type=text and an empty args_template
+    assert data["type"] == "text"
+    assert data["args_template"] == ""
+
+
+def test_generate_engine_config_respects_overwrite(tmp_path):
+    """When overwrite=False (default) and the file exists, return None."""
+    from ethllama.engines import generate_engine_config
+
+    target = tmp_path / "ollama.yaml"
+    target.write_text("name: ollama\nbinary: /old\n", encoding="utf-8")
+    old = target.read_text()
+
+    # Without --overwrite, generator returns None
+    out = generate_engine_config(
+        "ollama", "/new/path/ollama", engines_dir=tmp_path, overwrite=False,
+    )
+    assert out is None
+    assert target.read_text() == old  # untouched
+
+    # With --overwrite, generator returns the path and rewrites the file
+    out = generate_engine_config(
+        "ollama", "/new/path/ollama", engines_dir=tmp_path, overwrite=True,
+    )
+    assert out is not None
+    import yaml
+    with open(out) as f:
+        data = yaml.safe_load(f)
+    assert data["binary"] == "/new/path/ollama"
+
+
+def test_known_engines_has_minimum_set():
+    """KNOWN_ENGINES catalogues the most important engines a user might have."""
+    from ethllama.engines import KNOWN_ENGINES
+
+    required = {"ollama", "llama-cli", "llama-server", "whisper-cli"}
+    missing = required - set(KNOWN_ENGINES.keys())
+    assert not missing, f"KNOWN_ENGINES missing: {missing}"
+    # Every entry should have a type, a template, and a description
+    for name, spec in KNOWN_ENGINES.items():
+        assert "type" in spec, f"{name} missing type"
+        assert "template" in spec, f"{name} missing template"
+        assert "description" in spec, f"{name} missing description"
+        assert spec["type"] in ("text", "stt", "tts", "image"), (
+            f"{name} has unexpected type: {spec['type']}"
+        )
+
+
