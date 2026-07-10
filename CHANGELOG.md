@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `ethllama discover` command: scans PATH for known inference engine
+  binaries (ollama, llama-cli, llama-server, whisper-cli, voxtral, etc.)
+  and auto-generates engine config YAMLs in `~/.ethllama/engines/`.
+  Supports `--overwrite`, `--no-generate` (dry-run), and `--engines-dir`.
+  (12 new tests, 153 total.)
 - Voxtral (voxtral-mini-realtime-rs) example engine configs:
   `docs/examples/voxtral-stt.yaml` and `docs/examples/voxtral-tts.yaml`.
   Set up voxtral locally and copy the YAML to `~/.ethllama/engines/`.
