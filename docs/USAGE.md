@@ -557,6 +557,22 @@ You can also use models directly from the HuggingFace cache:
   models--meta-llama--Llama-3.2-3B/...
 ```
 
+### llama2.c (educational)
+
+For Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) models
+(tiny stories in raw `.bin` format):
+
+````bash
+git clone https://github.com/karpathy/llama2.c.git
+cd llama2.c
+make run
+# Download a model: stories15M.bin + tokenizer.bin
+# Configure engine: cp docs/examples/llama2-c.yaml ~/.ethllama/engines/
+
+ethllama run stories15M.bin
+````
+
+
 ## API Usage
 
 ### Starting the Server
@@ -674,6 +690,29 @@ ethllama transcribe sample.wav --engine whisper-cpp
 4. Verify with `ethllama engines` -- the whisper-cpp entry should show ✓.
 
 See `docs/examples/whisper-cpp.yaml` for a complete engine config.
+
+### Voxtral (real-time TTS/STT)
+
+[voxtral-mini-realtime-rs](https://github.com/TrevorS/voxtral-mini-realtime-rs)
+is a Rust real-time speech engine. Single `voxtral` binary with `transcribe` (STT)
+and `speak` (TTS) subcommands. Uses GGUF v3 Q4_0 models.
+
+Pull a model and wire it up:
+```bash
+ethllama pull -s hf TrevorJS/voxtral-mini-realtime-gguf    # STT (~2.5 GB)
+ethllama pull -s hf TrevorJS/voxtral-tts-q4-gguf          # TTS (~2.7 GB)
+
+# Engine configs
+cp docs/examples/voxtral-stt.yaml ~/.ethllama/engines/
+cp docs/examples/voxtral-tts.yaml ~/.ethllama/engines/
+
+ethllama transcribe recording.wav --engine voxtral-stt
+ethllama tts "Hello" --engine voxtral-tts --output hello.wav
+```
+
+Requires a GPU (Vulkan/Metal/WebGPU). Single `voxtral` binary is shipped from
+the upstream GitHub release; pre-compiled binaries for Linux/macOS/Windows
+are available in the releases page.
 
 ## Custom Engine Configuration
 

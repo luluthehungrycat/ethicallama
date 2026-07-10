@@ -7,14 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- TTS engine support: `ethllama tts` command synthesizes speech from text.
-  Supports `--voice`, `--speed`, `--play`, `--format` (wav/mp3/ogg/flac).
-  Engine type `tts` in EngineConfig. Mirrors the existing STT pattern.
-  (24 new tests, 134 total.)
-- Per-model configuration aliases: set defaults in `~/.ethllama/config.yaml`
-  under `model_defaults:<model_stem>` for temperature, top_k, n_gpu_layers,
-  gpu_backend, system_prompt, ctx_size, chat_template path. CLI flags take
-  precedence over per-model values. (14 new tests.)
+- Voxtral (voxtral-mini-realtime-rs) example engine configs:
+  `docs/examples/voxtral-stt.yaml` and `docs/examples/voxtral-tts.yaml`.
+  Set up voxtral locally and copy the YAML to `~/.ethllama/engines/`.
+- llama2.c compatibility: `docs/examples/llama2-c.yaml` engine config,
+  `ethllama/llama2c.py` helper with `is_llama2c_model()` and
+  `find_tokenizer_for()`. Run via `ethllama run --engine llama2-c`.
+- TTL / idle model unloading: `--ttl` / `--idle-timeout` flag on
+  `ethllama serve`. Models idle longer than the timeout are unloaded
+  from memory. Configured in `config.yaml` via `api.idle_timeout`.
+  (3 new tests, 141 total.)
+
+## [0.1.3] - 2026-07-07
 
 ## [0.1.2] - 2026-07-07
 - Configurable binary paths for llama.cpp tools: users can set

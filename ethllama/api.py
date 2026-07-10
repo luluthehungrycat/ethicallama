@@ -4,6 +4,7 @@ import os
 import time
 import json
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -15,6 +16,8 @@ from pydantic import BaseModel
 from .config import load_config
 from .index import load_index, resolve_model_path
 from .inference import run_inference, get_embeddings, get_gpu_config, format_chat_messages
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -186,12 +189,66 @@ def _model_path_and_gpu(model_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Idle unloader (TTL)
+# ---------------------------------------------------------------------------
+
+async def _idle_unloader(app, idle_timeout: int):
+    """Background task that unloads the model after ``idle_timeout`` seconds of inactivity.
+
+    Runs forever (until the event loop is torn down at server shutdown). Every
+    30 seconds it inspects ``app.state.last_request_time``; if the elapsed
+    idle period has exceeded ``idle_timeout`` and a pre-loaded model is
+    still resident, the model reference is cleared so the next request falls
+    through to the normal model resolution path (and the model is reloaded
+    lazily).
+
+    Setting ``idle_timeout <= 0`` disables the task entirely.
+    """
+    if idle_timeout <= 0:
+        return  # disabled
+
+    while True:
+        await asyncio.sleep(30)  # check every 30 seconds
+        last_use = getattr(app.state, 'last_request_time', None)
+        if last_use is None:
+            continue
+
+        elapsed = time.monotonic() - last_use
+        if elapsed >= idle_timeout and app.state.preloaded_model is not None:
+            logger.info(
+                "Model unloaded after %.0fs of inactivity (timeout=%ds)",
+                elapsed, idle_timeout,
+            )
+            app.state.preloaded_model = None
+            app.state.last_request_time = None
+
+
+@app.on_event('startup')
+async def _start_idle_unloader():
+    """Start the background idle-unloader task when ``idle_timeout`` is set.
+
+    The task is stored on ``app.state._idle_unloader_task`` so tests and
+    shutdown handlers can reference / cancel it.  When ``idle_timeout <= 0``
+    no task is created and the TTL feature is effectively disabled.
+    """
+    idle = getattr(app.state, 'idle_timeout', 0)
+    if idle > 0:
+        logger.info("Idle timeout set to %ds", idle)
+        app.state._idle_unloader_task = asyncio.create_task(
+            _idle_unloader(app, idle)
+        )
+
+
+# ---------------------------------------------------------------------------
 # Streaming helpers
 # ---------------------------------------------------------------------------
 
 async def _stream_chat_completion(request: ChatCompletionRequest):
     """Stream chat completion response as Server-Sent Events."""
     from .inference import format_chat_messages
+    # Touch the idle-clock so a long-running stream is not unloaded
+    # mid-flight by the background TTL unloader.
+    app.state.last_request_time = time.monotonic()
     model_path, gpu = _model_path_and_gpu(request.model)
     response_text = await asyncio.to_thread(
         run_inference,
@@ -241,6 +298,9 @@ async def _stream_chat_completion(request: ChatCompletionRequest):
 
 async def _stream_completion(request: CompletionRequest):
     """Stream text completion as Server-Sent Events."""
+    # Touch the idle-clock so a long-running stream is not unloaded
+    # mid-flight by the background TTL unloader.
+    app.state.last_request_time = time.monotonic()
     model_path, gpu = _model_path_and_gpu(request.model)
     response_text = await asyncio.to_thread(
         run_inference,
@@ -335,6 +395,7 @@ async def embeddings(
     auth: bool = Depends(verify_api_key),
 ):
     """OpenAI-compatible embeddings endpoint."""
+    app.state.last_request_time = time.monotonic()
     model_path, gpu = _model_path_and_gpu(request.model)
     inputs = request.input if isinstance(request.input, list) else [request.input]
     # Run in executor
@@ -370,6 +431,7 @@ async def chat_completions(
     auth: bool = Depends(verify_api_key),
 ):
     """OpenAI-compatible chat completions endpoint."""
+    app.state.last_request_time = time.monotonic()
     if request.stream:
         return StreamingResponse(
             _stream_chat_completion(request),
@@ -422,6 +484,7 @@ async def completions(
     auth: bool = Depends(verify_api_key),
 ):
     """OpenAI-compatible legacy completions endpoint."""
+    app.state.last_request_time = time.monotonic()
     if request.stream:
         return StreamingResponse(
             _stream_completion(request),
@@ -475,7 +538,7 @@ def create_app() -> FastAPI:
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
-               model_path: Optional[str] = None):
+               model_path: Optional[str] = None, idle_timeout: int = 0):
     """Run the API server with uvicorn.
 
     Parameters
@@ -487,6 +550,11 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
         pre-loaded by the server. Stored on ``app.state.preloaded_model``
         and surfaced in ``GET /v1/models`` and used as a fallback by
         :func:`_model_path_and_gpu`.
+    idle_timeout
+        If > 0, the background :func:`_idle_unloader` task auto-unloads
+        the pre-loaded model after this many seconds of inactivity.  If
+        0 (the default) the TTL feature is disabled and the model
+        stays resident for the lifetime of the server.
     """
     import uvicorn
 
@@ -497,8 +565,15 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
         save_config(config)
 
     # Stash the preloaded model path on the FastAPI app state so route
-    # handlers can read it from any thread.
+    # handlers can read it from any thread.  Also initialise the idle
+    # clock and the idle_timeout setting; the latter is read by the
+    # startup hook to decide whether to spawn the background unloader.
     app.state.preloaded_model = model_path if model_path else None
+    app.state.last_request_time = None
+    app.state.idle_timeout = int(idle_timeout or 0)
+
+    if app.state.idle_timeout > 0:
+        logger.info("Idle timeout set to %ds", app.state.idle_timeout)
 
     uvicorn.run(
         app,

@@ -589,6 +589,11 @@ def run(
     """Run inference with a model.
 
     MODEL is a model filename, path, or identifier from the index.
+
+    Note: For llama2.c models (raw .bin files from Karpathy's educational
+    inference engine), point --binary-dir at the compiled `run` binary
+    and use an EngineConfig with args_template that names the
+    tokenizer.bin file. See docs/examples/llama2-c.yaml.
     """
     # 0. Apply runtime binary override
     if binary_dir:
@@ -945,13 +950,21 @@ def config(do_init: bool):
 @click.option("--threads", default=4, show_default=True, type=int, help="CPU thread count")
 @click.option("--model", "-m", default=None, type=str,
               help="Model identifier or path to pre-load at server startup")
+@click.option("--idle-timeout", "--ttl", default=0, show_default=True, type=int,
+              help="Auto-unload model after N seconds idle (0=disabled)")
 @click.option("--binary-dir", default=None, type=str,
               help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
 def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str,
-          threads: int, model: Optional[str], binary_dir: Optional[str]):
+          threads: int, model: Optional[str], idle_timeout: int, binary_dir: Optional[str]):
     """Start the HTTP API server (FastAPI, opt-in).
 
     MODEL is an optional model identifier or path to pre-load at startup.
+
+    Use ``--idle-timeout`` / ``--ttl N`` to auto-unload the pre-loaded model
+    after N seconds of inactivity (0 = never unload).  This is useful for
+    freeing GPU memory when the server sits idle for long periods.  On the
+    next request after an unload the model is re-resolved from the index
+    (or returns 404 if not indexed).
     """
     from .inference import set_gpu_config, set_binary_config
 
@@ -1036,9 +1049,17 @@ def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: st
         click.echo("API key authentication enabled")
     if preloaded_model:
         click.echo(f"Pre-loaded model: {preloaded_model}")
+    if idle_timeout and idle_timeout > 0:
+        click.echo(f"Idle timeout: {idle_timeout}s (model will unload after inactivity)")
     click.echo("Press Ctrl+C to stop")
     try:
-        run_server(host=host, port=port, api_key=api_key, model_path=preloaded_model)
+        run_server(
+            host=host,
+            port=port,
+            api_key=api_key,
+            model_path=preloaded_model,
+            idle_timeout=idle_timeout,
+        )
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")
 

@@ -53,6 +53,12 @@ DEFAULT_CONFIG = {
         "host": "127.0.0.1",
         "port": 8080,
         "api_key": "",
+        # TTL (idle model unloading) for ``ethllama serve``.  When > 0 the
+        # server auto-unloads a pre-loaded model after this many seconds of
+        # inactivity, freeing GPU/RAM.  0 (default) disables the feature and
+        # the model stays loaded for the lifetime of the server.  Mirrors
+        # the ``--idle-timeout``/``--ttl`` CLI flag on ``ethllama serve``.
+        "idle_timeout": 0,
     },
     "telemetry": {
         "enabled": False,

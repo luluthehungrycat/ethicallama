@@ -402,3 +402,78 @@ def test_no_preloaded_model_means_state_attr_is_none(test_client, monkeypatch):
     monkeypatch.setattr(api.app.state, "preloaded_model", None, raising=False)
     preloaded = getattr(api.app.state, "preloaded_model", None)
     assert preloaded is None
+
+
+
+# ---------------------------------------------------------------------------
+# TTL (idle model unloading)
+# ---------------------------------------------------------------------------
+
+def test_run_server_accepts_idle_timeout_kwarg():
+    """``run_server`` declares ``idle_timeout`` as a keyword argument with default 0.
+
+    A default of 0 means the TTL feature is opt-in and existing call
+    sites that do not pass ``idle_timeout`` keep working unchanged.
+    """
+    import inspect
+    sig = inspect.signature(api.run_server)
+    assert "idle_timeout" in sig.parameters
+    assert sig.parameters["idle_timeout"].default == 0
+
+
+async def test_idle_unloader_task_created_when_idle_timeout_positive(monkeypatch):
+    """Startup hook spawns a background task when ``idle_timeout > 0``."""
+    # Ensure clean state — the conftest does not reset these per-test.
+    monkeypatch.setattr(api.app.state, "idle_timeout", 60, raising=False)
+    monkeypatch.setattr(api.app.state, "preloaded_model", "/tmp/fake.gguf", raising=False)
+    monkeypatch.setattr(api.app.state, "last_request_time", None, raising=False)
+    monkeypatch.setattr(api.app.state, "_idle_unloader_task", None, raising=False)
+
+    # Invoke the startup hook directly (no need to spin up a real server).
+    await api._start_idle_unloader()
+
+    # A task must have been created and stored on app.state.
+    task = getattr(api.app.state, "_idle_unloader_task", None)
+    assert task is not None
+    # It must be a real asyncio task (not just any object).
+    import asyncio as _asyncio
+    assert isinstance(task, _asyncio.Task)
+
+    # Clean up so we do not leak a 30-second sleep into other tests.
+    task.cancel()
+    try:
+        await task
+    except _asyncio.CancelledError:
+        pass
+
+
+def test_last_request_time_updated_on_chat_completion(
+    test_client, indexed_model, monkeypatch
+):
+    """``POST /v1/chat/completions`` bumps ``app.state.last_request_time``."""
+    import time as _time
+    filename, _ = indexed_model
+
+    # Start from a known sentinel well in the past.
+    monkeypatch.setattr(api.app.state, "last_request_time", None, raising=False)
+
+    before = _time.monotonic()
+    response = test_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": filename,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    after = _time.monotonic()
+
+    assert response.status_code == 200
+
+    # The handler must have touched last_request_time, and the new
+    # value must fall inside the wall-clock window of the request.
+    last = getattr(api.app.state, "last_request_time", None)
+    assert last is not None, "handler did not update last_request_time"
+    assert before - 1.0 <= last <= after + 1.0, (
+        f"last_request_time={last} outside [{before}, {after}]"
+    )
+

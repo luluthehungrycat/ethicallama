@@ -1,0 +1,13 @@
+name: voxtral-tts
+type: tts
+binary: /path/to/voxtral
+args_template: "speak --text '{{ prompt }}' --gguf {{ model_path }} --output {{ output }} --voice {{ voice | default('casual_female') }} --euler-steps 3"
+model_extensions:
+  - .gguf
+notes: |
+  Voxtral TTS. Available voices (20 total, 9 languages):
+  casual_female, casual_male, formal_female, formal_male, energetic_female,
+  energetic_male, calm_female, calm_male, dramatic_female, dramatic_male,
+  whispering_female, whispering_male, plus 8 more.
+  euler-steps: 3 = real-time, 4 = balanced, 8 = high quality.
+  Run `voxtral speak --list-voices` to see all voices.
