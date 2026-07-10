@@ -1,0 +1,11 @@
+name: voxtral-stt
+type: stt
+binary: /path/to/voxtral
+args_template: "transcribe --audio {{ input }} --gguf {{ model_path }}"
+model_extensions:
+  - .gguf
+notes: |
+  Voxtral requires a GPU with Vulkan/Metal/WebGPU support (Burn/wgpu backend).
+  The .gguf model file is the Q4_0 quant of Mistral's Voxtral-Mini-4B-Realtime.
+  Single binary `voxtral` handles both `speak` and `transcribe` subcommands;
+  this engine config only exposes the STT side. Use voxtral-tts.yaml for TTS.

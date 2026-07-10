@@ -1,0 +1,10 @@
+name: llama2.c
+type: text
+binary: /path/to/run
+args_template: "{{ model_path }} {{ tokenizer_path }} -t {{ temperature }} -n {{ max_tokens }} -p '{{ prompt }}'"
+model_extensions:
+  - .bin
+notes: |
+  llama2.c model files are raw PyTorch checkpoints, not GGUF.
+  Pair with the matching tokenizer.bin (e.g., tokenizer.bin).
+  Typical models: karpathy/tinyllamas (15M, 42M, 110M params).
