@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Systemd service: `ExecStart` no longer hardcodes `/usr/local/bin/ethllama`.
+  Now uses bare `ethllama` with an expanded `Environment=PATH` so the
+  service works for both `pip install` and `uv tool install` (binary
+  at `~/.local/bin/ethllama`). INSTALL.md covers both install paths.
+
+## [0.1.6] - 2026-07-11
+
 ### Added
 - Default `ethllama serve` port changed from 8080 to **10434** (homage
   to Ollama's 11434). Override with `--port`.

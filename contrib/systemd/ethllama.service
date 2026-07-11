@@ -5,13 +5,20 @@ After=network.target
 
 [Service]
 Type=simple
+# Run as the same user that installed ethicallama. Edit this for your setup.
+# Common values:
+#   - User=root                (system-wide `pip install`)
+#   - User=ethllama            (dedicated service user with system-wide install)
+#   - User=moritz              (per-user `uv tool install` — adjust as needed)
 User=ethllama
 Group=ethllama
 WorkingDirectory=/var/lib/ethllama
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+# Include both system-wide and per-user binary paths so the service works
+# regardless of whether you used `pip install` or `uv tool install`.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/ethllama/.local/bin:/home/moritz/.local/bin"
 Environment="ETHLLAMA_CONFIG=/etc/ethllama/config.yaml"
 EnvironmentFile=-/etc/ethllama/ethllama.env
-ExecStart=/usr/local/bin/ethllama serve --host 0.0.0.0 --port 10434
+ExecStart=ethllama serve --host 0.0.0.0 --port 10434
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
