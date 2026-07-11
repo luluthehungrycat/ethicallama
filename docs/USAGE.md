@@ -817,6 +817,103 @@ ethllama --verbose run model.gguf --prompt "Hello"
 
 Logs are written to `~/.ethllama/logs/`. Check these for detailed error information.
 
+## Production Deployment
+
+### Quick start with systemd
+
+The fastest way to run ethicallama as a network service:
+
+1. **Install the package:**
+   ```bash
+   pip install ethicallama
+   ```
+
+2. **Configure the system user:**
+   ```bash
+   sudo useradd --system --shell /usr/sbin/nologin --home /var/lib/ethllama ethllama
+   sudo mkdir -p /var/lib/ethllama /etc/ethllama
+   sudo chown ethllama:ethllama /var/lib/ethllama
+   ```
+
+3. **Install the systemd service:**
+   ```bash
+   sudo cp contrib/systemd/ethllama.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now ethllama
+   ```
+
+4. **Test the API:**
+   ```bash
+   curl http://localhost:10434/health
+   ```
+
+5. **Front it with nginx + Let's Encrypt** (optional):
+   ```bash
+   sudo cp contrib/nginx/ethllama.conf /etc/nginx/sites-available/
+   sudo ln -s /etc/nginx/sites-available/ethllama.conf /etc/nginx/sites-enabled/
+   sudo certbot --nginx -d ethllama.example.com
+   sudo systemctl restart nginx
+   ```
+
+### HTTPS with native uvicorn
+
+ethicallama can serve HTTPS directly without a reverse proxy:
+
+```bash
+ethllama serve \
+  --host 0.0.0.0 \
+  --port 443 \
+  --ssl-keyfile /etc/ethllama/server.key \
+  --ssl-certfile /etc/ethllama/server.crt
+```
+
+Generate a self-signed cert for testing:
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes -keyout server.key -out server.crt -days 365
+```
+
+### Authentication
+
+Set an API key:
+```bash
+ethllama serve --api-key your-secret-here
+```
+
+Clients must send `Authorization: Bearer your-secret-here` on every request.
+
+### Default port
+
+ethicallama listens on port **10434** by default (an homage to Ollama's 11434). Override with `--port`.
+
+### Idle model unloading
+
+Use `--idle-timeout` to auto-unload models after N seconds of inactivity:
+```bash
+ethllama serve --idle-timeout 600
+```
+
+This saves GPU memory when running multiple models.
+
+### Running as a public service
+
+**CORS**: The default config doesn't enable CORS. For browser clients, set `cors_allow_origins` in `~/.ethllama/config.yaml`:
+```yaml
+api:
+  cors_allow_origins:
+    - "https://myapp.example.com"
+```
+
+**Rate limiting**: Recommended for public deployments. Use nginx's `limit_req` zone:
+```nginx
+limit_req_zone $binary_remote_addr zone=ethllama:10m rate=10r/s;
+location / {
+    limit_req zone=ethllama burst=20 nodelay;
+    proxy_pass http://ethllama_backend;
+}
+```
+
+**Metrics**: ethicallama exposes `/health` for liveness. For Prometheus, consider deploying an exporter.
+
 ### Getting Help
 
 - Open an issue on the project repository

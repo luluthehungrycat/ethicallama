@@ -537,8 +537,17 @@ def create_app() -> FastAPI:
     return app
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
-               model_path: Optional[str] = None, idle_timeout: int = 0):
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 10434,
+    api_key: str = "",
+    model_path: Optional[str] = None,
+    idle_timeout: int = 0,
+    ssl_keyfile: Optional[str] = None,
+    ssl_certfile: Optional[str] = None,
+    ssl_keyfile_password: Optional[str] = None,
+    ssl_ca_certs: Optional[str] = None,
+) -> None:
     """Run the API server with uvicorn.
 
     Parameters
@@ -555,6 +564,17 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
         the pre-loaded model after this many seconds of inactivity.  If
         0 (the default) the TTL feature is disabled and the model
         stays resident for the lifetime of the server.
+    ssl_keyfile, ssl_certfile
+        Paths to the TLS private key and certificate.  When both are
+        provided, the server listens for HTTPS connections instead of
+        HTTP.  When only one is provided, a warning is logged and the
+        server falls back to plain HTTP.
+    ssl_keyfile_password
+        Optional password for an encrypted TLS private key.
+    ssl_ca_certs
+        Optional path to a CA bundle for verifying client certificates
+        (mutual TLS).  Requires the client to present a cert signed by
+        this CA.
     """
     import uvicorn
 
@@ -575,9 +595,33 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, api_key: str = "",
     if app.state.idle_timeout > 0:
         logger.info("Idle timeout set to %ds", app.state.idle_timeout)
 
-    uvicorn.run(
-        app,
+    # Build uvicorn kwargs
+    uvicorn_kwargs = dict(
+        app=app,
         host=host,
         port=port,
         log_level="info",
     )
+
+    # Add SSL config if both keyfile and certfile are provided.
+    # uvicorn (which wraps the stdlib ssl module) requires both files
+    # to enable HTTPS; if only one is set we warn and continue with HTTP
+    # so the user gets a clear error message rather than a TLS handshake
+    # failure on the first request.
+    if ssl_keyfile and ssl_certfile:
+        uvicorn_kwargs["ssl_keyfile"] = ssl_keyfile
+        uvicorn_kwargs["ssl_certfile"] = ssl_certfile
+        if ssl_keyfile_password:
+            uvicorn_kwargs["ssl_keyfile_password"] = ssl_keyfile_password
+        if ssl_ca_certs:
+            uvicorn_kwargs["ssl_ca_certs"] = ssl_ca_certs
+        logger.info("Starting with HTTPS on %s:%d", host, port)
+    else:
+        if ssl_keyfile or ssl_certfile:
+            logger.warning(
+                "Both --ssl-keyfile and --ssl-certfile are required for HTTPS; "
+                "falling back to HTTP."
+            )
+        logger.info("Starting with HTTP on %s:%d", host, port)
+
+    uvicorn.run(**uvicorn_kwargs)

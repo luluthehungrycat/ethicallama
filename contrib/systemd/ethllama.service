@@ -1,0 +1,28 @@
+[Unit]
+Description=ethicallama — ethical, local-only LLM inference server
+Documentation=https://github.com/luluthehungrycat/ethicallama
+After=network.target
+
+[Service]
+Type=simple
+User=ethllama
+Group=ethllama
+WorkingDirectory=/var/lib/ethllama
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="ETHLLAMA_CONFIG=/etc/ethllama/config.yaml"
+EnvironmentFile=-/etc/ethllama/ethllama.env
+ExecStart=/usr/local/bin/ethllama serve --host 0.0.0.0 --port 10434
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ethllama
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
