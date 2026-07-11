@@ -1408,6 +1408,124 @@ def test_serve_applies_per_model_config(tmp_path, monkeypatch):
     assert captured_serve.get("model_path") == str(model_path)
 
 # ---------------------------------------------------------------------------
+# SSL / HTTPS support for `ethllama serve`
+# ---------------------------------------------------------------------------
+
+
+def test_serve_help_shows_ssl_options():
+    """`ethllama serve --help` documents the --ssl-* options."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["serve", "--help"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "--ssl-keyfile" in out
+    assert "--ssl-certfile" in out
+    assert "--ssl-keyfile-password" in out
+    assert "--ssl-ca-certs" in out
+    # The help text should explain that the options enable HTTPS
+    assert "HTTPS" in out
+
+
+def test_serve_default_port_is_10434():
+    """`ethllama serve` defaults to port 10434 (Ollama homage)."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["serve", "--help"])
+    assert result.exit_code == 0
+    # show_default=True prints the default in the help text
+    assert "10434" in result.output
+    # The old default (8080) must not appear as a default value
+    assert "8080" not in result.output
+
+
+def test_serve_passes_ssl_to_run_server(monkeypatch, tmp_path):
+    """`ethllama serve --ssl-*` passes the SSL args through to run_server()."""
+    import builtins
+    import ethllama.cli as cli_mod
+
+    # Create dummy PEM files on disk so click.Path(exists=True) accepts them
+    keyfile = tmp_path / "server.key"
+    keyfile.write_text("dummy key content")
+    certfile = tmp_path / "server.crt"
+    certfile.write_text("dummy cert content")
+    ca_certs = tmp_path / "ca.pem"
+    ca_certs.write_text("dummy ca content")
+
+    captured: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured.update(kwargs)
+        # Break out of the server loop without actually listening
+        raise KeyboardInterrupt()
+
+    # Patch the lazy import so the test doesn't need fastapi installed
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        mod = real_import(name, *a, **kw)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server  # type: ignore[attr-defined]
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: "")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--ssl-keyfile", str(keyfile),
+            "--ssl-certfile", str(certfile),
+            "--ssl-keyfile-password", "supersecret",
+            "--ssl-ca-certs", str(ca_certs),
+        ],
+    )
+
+    # run_server was called with the SSL args forwarded
+    assert captured.get("ssl_keyfile") == str(keyfile)
+    assert captured.get("ssl_certfile") == str(certfile)
+    assert captured.get("ssl_keyfile_password") == "supersecret"
+    assert captured.get("ssl_ca_certs") == str(ca_certs)
+    # And the port should default to 10434
+    assert captured.get("port") == 10434
+
+
+def test_serve_ssl_only_keyfile_warns_but_does_not_pass_partial_ssl(monkeypatch, tmp_path):
+    """Providing only --ssl-keyfile (without --ssl-certfile) still calls
+    run_server with both values (the API layer logs a warning and falls
+    back to HTTP)."""
+    import builtins
+    import ethllama.cli as cli_mod
+
+    keyfile = tmp_path / "server.key"
+    keyfile.write_text("dummy key content")
+
+    captured: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured.update(kwargs)
+        raise KeyboardInterrupt()
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        mod = real_import(name, *a, **kw)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server  # type: ignore[attr-defined]
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: "")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["serve", "--ssl-keyfile", str(keyfile)])
+
+    # SSL args are passed through to run_server (warning is the API's job)
+    assert captured.get("ssl_keyfile") == str(keyfile)
+    assert captured.get("ssl_certfile") is None
+
+
+# ---------------------------------------------------------------------------
 # Engine discovery: `ethllama discover`
 # ---------------------------------------------------------------------------
 

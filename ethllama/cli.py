@@ -949,7 +949,7 @@ def config(do_init: bool):
 
 @main.command()
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host to bind to")
-@click.option("--port", "-p", default=8080, show_default=True, type=int, help="Port to listen on")
+@click.option("--port", "-p", default=10434, show_default=True, type=int, help="Port to listen on (default 10434 — Ollama homage)")
 @click.option("--api-key", default="", help="API key for authentication")
 @click.option("--n-gpu-layers", default=0, show_default=True, type=int, help="Layers to offload to GPU")
 @click.option("--gpu-backend", default="auto", show_default=True, type=str, help="GPU backend (vulkan, rocm, cuda, auto)")
@@ -960,8 +960,14 @@ def config(do_init: bool):
               help="Auto-unload model after N seconds idle (0=disabled)")
 @click.option("--binary-dir", default=None, type=str,
               help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
+@click.option("--ssl-keyfile", default=None, type=click.Path(exists=True), help="Path to TLS key file (enables HTTPS)")
+@click.option("--ssl-certfile", default=None, type=click.Path(exists=True), help="Path to TLS certificate file (enables HTTPS)")
+@click.option("--ssl-keyfile-password", default=None, type=str, help="Password for encrypted TLS key file")
+@click.option("--ssl-ca-certs", default=None, type=click.Path(exists=True), help="Path to CA certificate file for client cert verification")
 def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str,
-          threads: int, model: Optional[str], idle_timeout: int, binary_dir: Optional[str]):
+          threads: int, model: Optional[str], idle_timeout: int, binary_dir: Optional[str],
+          ssl_keyfile: Optional[str], ssl_certfile: Optional[str],
+          ssl_keyfile_password: Optional[str], ssl_ca_certs: Optional[str]):
     """Start the HTTP API server (FastAPI, opt-in).
 
     MODEL is an optional model identifier or path to pre-load at startup.
@@ -1065,6 +1071,10 @@ def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: st
             api_key=api_key,
             model_path=preloaded_model,
             idle_timeout=idle_timeout,
+            ssl_keyfile=ssl_keyfile,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile_password=ssl_keyfile_password,
+            ssl_ca_certs=ssl_ca_certs,
         )
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Default `ethllama serve` port changed from 8080 to **10434** (homage
+  to Ollama's 11434). Override with `--port`.
+- Native HTTPS support: `--ssl-keyfile`, `--ssl-certfile`,
+  `--ssl-keyfile-password`, `--ssl-ca-certs` flags on `serve`.
+- `contrib/systemd/ethllama.service` — turnkey systemd unit (hardened:
+  NoNewPrivileges, PrivateTmp, ProtectSystem=strict, no caps).
+  Plus `ethllama.env.example` and `INSTALL.md`.
+- `contrib/nginx/ethllama.conf` — production reverse proxy with HTTP→HTTPS
+  301, Let's Encrypt-ready, large timeouts for big models, SSE streaming.
+- Production deployment guide in USAGE.md (systemd, HTTPS, CORS,
+  rate limiting).
 - `ethllama discover` command: scans PATH for known inference engine
   binaries (ollama, llama-cli, llama-server, whisper-cli, voxtral, etc.)
   and auto-generates engine config YAMLs in `~/.ethllama/engines/`.
