@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Made the Rust `ethllama-core` native extension optional. The
+  `ethllama-core` crate now exposes a `llama-cpp` Cargo feature (on
+  by default) and the build script no longer panics when the
+  `llama.cpp` git submodule is missing. Instead, it emits a warning
+  and the lib compiles a stub `PyLlamaModel` that loads but raises
+  `RuntimeError` on instantiation. The Python side already handles
+  this via `has_inference_engine()` and falls back to the subprocess
+  inference path (llama-cli, ollama, etc.). This unblocks
+  `pip install` and `uv tool install` from sdist on platforms where
+  no pre-built wheel is available (e.g. Raspberry Pi / ARM Linux).
+
 ### Fixed
 - Systemd service `ProtectHome` was blocking `/home/<user>/.local/`
   access for `ethllama` service user. Switched default to
