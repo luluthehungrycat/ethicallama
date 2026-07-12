@@ -5,17 +5,19 @@ After=network.target
 
 [Service]
 Type=simple
-# Run as the same user that installed ethicallama. Edit this for your setup.
-# Common values:
-#   - User=root                (system-wide `pip install`)
-#   - User=ethllama            (dedicated service user with system-wide install)
-#   - User=moritz              (per-user `uv tool install` — adjust as needed)
-User=ethllama
-Group=ethllama
-WorkingDirectory=/var/lib/ethllama
-# Include both system-wide and per-user binary paths so the service works
-# regardless of whether you used `pip install` or `uv tool install`.
-Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/ethllama/.local/bin:/home/moritz/.local/bin"
+# User to run as. Two common patterns:
+#   1. System-wide install (pip install) — use a dedicated system user:
+#        User=ethllama
+#        Group=ethllama
+#   2. Per-user install (uv tool install) — use the user that owns the tool:
+#        User=moritz
+# Pick the right one for your setup. The example below assumes per-user
+# (uv tool install). Replace with the appropriate username.
+User=moritz
+Group=moritz
+WorkingDirectory=/home/moritz
+# PATH must include both system-wide and per-user binary locations.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/moritz/.local/bin"
 Environment="ETHLLAMA_CONFIG=/etc/ethllama/config.yaml"
 EnvironmentFile=-/etc/ethllama/ethllama.env
 ExecStart=ethllama serve --host 0.0.0.0 --port 10434
@@ -23,11 +25,18 @@ Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
 # Hardening
-NoNewPrivileges=true
-PrivateTmp=true
+#
+# Note on ProtectHome: we use 'read-only' (not 'true') so the service can
+# read user-installed tools from /home/$USER/.local/ when running as a
+# per-user install. For system-wide installs, switch to 'true' for stronger
+# isolation.
+ProtectHome=read-only
+# ProtectSystem=strict still prevents writes outside the listed paths.
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/ethllama
+# ReadWritePaths limits writable locations (does not affect reads).
+ReadWritePaths=/home/moritz/.local/share/uv
+PrivateTmp=true
+NoNewPrivileges=true
 AmbientCapabilities=
 CapabilityBoundingSet=
 

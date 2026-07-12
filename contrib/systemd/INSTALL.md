@@ -10,71 +10,77 @@ common installation paths depending on how you installed the package.
   (run `ethllama config --init` first)
 - sudo access
 
-## Choose your install method
+## Pick the right user pattern
 
-### Option A: `pip install` (system-wide)
+There are two common patterns for running ethicallama as a service. Choose the one that matches your install method.
 
-The package is installed to `/usr/local/bin/ethllama` and the system
-Python environment. The systemd service can use a dedicated system user.
+### Pattern A: Per-user install (recommended for `uv tool install`)
 
-```bash
-sudo pip install ethicallama
-# or with all extras:
-sudo pip install "ethicallama[all]"
+This is the simplest setup if you used `uv tool install ethicallama`. The service runs as **your own user account**, so it can read your `~/.local/bin/ethllama` and the uv-managed venv at `~/.local/share/uv/tools/ethicallama/`.
+
+```ini
+[Service]
+User=moritz           # ← your username
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/moritz/.local/bin"
+ProtectHome=read-only
+ReadWritePaths=/home/moritz/.local/share/uv
 ```
 
-### Option B: `uv tool install` (per-user, recommended for development)
+**Note:** The v0.1.7+ service file uses `User=moritz` and `ProtectHome=read-only` by default. Edit to match your actual username.
 
-The package is installed to `~/.local/bin/ethllama` in a uv-managed
-virtual environment. This is recommended for development since you can
-have multiple versions side-by-side.
+**Don't** use the dedicated `ethllama` user — that user can't access your home dir.
 
-```bash
-uv tool install ethicallama
-# or with extras:
-uv tool install 'ethicallama[all]'
-```
+### Pattern B: Dedicated system user (for system-wide `pip install`)
 
-This is the install method used by uv. The binary lives at
-`~/.local/bin/ethllama` (not `/usr/local/bin/ethllama`).
-
-## Install steps
-
-### 1. Set up the service user (Option A only)
-
-If you used `pip install` and want a dedicated service user:
+For system-wide installs (e.g., `sudo pip install ethicallama`), use a dedicated `ethllama` user with stronger isolation. You must also install the API dependencies for the system user:
 
 ```bash
 sudo useradd --system --shell /usr/sbin/nologin --home /var/lib/ethllama ethllama
 sudo mkdir -p /etc/ethllama /var/lib/ethllama
 sudo chown ethllama:ethllama /var/lib/ethllama
+
+# Run as ethllama user
+sudo -u ethllama pip install fastapi 'uvicorn[standard]' pydantic
 ```
 
-If you used `uv tool install`, you can run as your own user. Skip this
-step and edit the `User=` line in the service file to match.
+Then use:
+```ini
+[Service]
+User=ethllama
+ProtectHome=true  # stronger isolation, can't read /home/$USER
+```
+
+## Install steps
+
+### 1. Install ethicallama
+
+**Pattern A (per-user, recommended):**
+```bash
+# Install ethicallama with API support
+uv tool install --with fastapi --with 'uvicorn[standard]' --with pydantic ethicallama
+```
+
+**Pattern B (system-wide):**
+```bash
+sudo pip install "ethicallama[all]"
+# or
+sudo pip install ethicallama "ethicallama[api]" -- target /usr/local
+```
 
 ### 2. Install the service file
 
 ```bash
+cd /path/to/ethicallama  # this repo
 sudo cp contrib/systemd/ethllama.service /etc/systemd/system/
 ```
 
-If running as a non-root user (uv tool case), edit the service file and
-change `User=ethllama` to your username (e.g. `User=moritz`).
+### 3. Edit the service file
 
-### 3. (Optional) Configure environment
+If using **Pattern A**, change `User=moritz` to your actual username. Also update `Environment=PATH` and `ReadWritePaths=` to match.
 
-```bash
-sudo cp contrib/systemd/ethllama.env.example /etc/ethllama/ethllama.env
-sudo nano /etc/ethllama/ethllama.env
-```
+If using **Pattern B**, change `User=moritz` to `User=ethllama` and uncomment the `Group=ethllama` line.
 
-Uncomment and set:
-- `ETHLLAMA_API_KEY=your-secret-here` — for API key auth
-- `ETHLLAMA_SSL_KEYFILE=/etc/ethllama/server.key` — for HTTPS
-- `ETHLLAMA_SSL_CERTFILE=/etc/ethllama/server.crt`
-
-### 4. Reload systemd and start
+### 4. Reload and start
 
 ```bash
 sudo systemctl daemon-reload
@@ -93,26 +99,30 @@ curl http://localhost:10434/health
 
 ### `Failed at step NAMESPACE spawning /usr/local/bin/ethllama: No such file or directory`
 
-The `ethllama` binary isn't at `/usr/local/bin/ethllama`. This means you
-installed via `uv tool install` (binary at `~/.local/bin/ethllama`).
+The `ethllama` binary isn't at `/usr/local/bin/ethllama`. Either:
+- (Pattern A users) You installed via `uv tool install`. Make sure the service runs as **your user** and `Environment=PATH` includes `~/.local/bin`. Don't use the v0.1.6-era `User=ethllama` line.
+- (Pattern B users) The binary should be at `/usr/local/bin/ethllama`. Reinstall with `sudo pip install ethicallama` if missing.
 
-**Fix**: Either:
-1. Edit the service file and set `User=` to your username (the user that
-   installed ethicallama), and add `~/.local/bin` to `Environment=PATH`:
-   ```
-   [Service]
-   User=moritz
-   Environment="PATH=/home/moritz/.local/bin:/usr/local/bin:/usr/bin:/bin"
-   ```
-2. Or create a symlink:
-   ```bash
-   sudo ln -s /home/$USER/.local/bin/ethllama /usr/local/bin/ethllama
-   ```
+### `No module named 'fastapi'`
+
+You installed ethicallama without the API extras:
+```bash
+uv tool uninstall ethicallama
+uv tool install --with fastapi --with 'uvicorn[standard]' --with pydantic ethicallama
+```
+
+Or install system-wide:
+```bash
+sudo pip install "ethicallama[api]"
+```
 
 ### Service runs but `curl` returns "Connection refused"
 
-The service is binding to 127.0.0.1 by default. For network access, edit
-the service file:
+The service is binding to 127.0.0.1. For network access, edit the service:
 ```
 ExecStart=ethllama serve --host 0.0.0.0 --port 10434
 ```
+
+### Permission denied reading `~/.local/`
+
+The service user can't traverse your home. Switch to **Pattern A** (run as your own user) instead of `User=ethllama`.
