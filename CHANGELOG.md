@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Systemd service `ProtectHome` was blocking `/home/<user>/.local/`
+  access for `ethllama` service user. Switched default to
+  `ProtectHome=read-only` so per-user `uv tool install` works without
+  removing isolation entirely. `User=moritz` is the new default; INSTALL.md
+  has a Pattern A (per-user) vs Pattern B (system user) picker.
+
+## [0.1.7] - 2026-07-11
+
+### Fixed
 - Systemd service: `ExecStart` no longer hardcodes `/usr/local/bin/ethllama`.
   Now uses bare `ethllama` with an expanded `Environment=PATH` so the
   service works for both `pip install` and `uv tool install` (binary

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ethicallama"
-version = "0.1.7"
+version = "0.1.8"
 description = "ethical, local-only inference wrapper for llama.cpp"
 readme = "README.md"
 license = {text = "MIT"}

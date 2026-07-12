@@ -855,6 +855,20 @@ The fastest way to run ethicallama as a network service:
    sudo systemctl restart nginx
    ```
 
+### API extras required
+
+The HTTP server requires FastAPI dependencies. Install with:
+
+```bash
+# uv tool users
+uv tool install --with fastapi --with 'uvicorn[standard]' --with pydantic ethicallama
+
+# pip users
+pip install "ethicallama[api]"
+```
+
+Without these, `ethllama serve` fails with `No module named 'fastapi'`.
+
 ### HTTPS with native uvicorn
 
 ethicallama can serve HTTPS directly without a reverse proxy:
