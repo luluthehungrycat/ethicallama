@@ -7,9 +7,25 @@ edition = "2021"
 name = "ethllama_core"
 crate-type = ["cdylib"]
 
+# The `llama-cpp` feature is enabled by default. It pulls in the cmake + cc
+# build-dependencies and links the bundled llama.cpp static library.
+# When this feature is disabled (e.g. for a wheel build without the git
+# submodule), the build script skips the cmake/cc steps and the Rust code
+# compiles a stub extension that raises RuntimeError on PyLlamaModel().
+#
+# Note: at the level of the build script, the feature is *also* a proxy for
+# "the llama.cpp submodule is present". When the submodule is missing, the
+# build script emits `cargo:rustc-cfg=stub_mode` and the lib code uses
+# `#[cfg(all(feature = "llama-cpp", not(stub_mode)))]` to switch to the
+# stub path. This way, sdist builds (where the feature is on by default
+# but the submodule is absent) still compile.
+[features]
+default = ["llama-cpp"]
+llama-cpp = ["dep:cmake", "dep:cc"]
+
 [build-dependencies]
-cmake = "0.1"
-cc = "1.0"
+cmake = { version = "0.1", optional = true }
+cc = { version = "1.0", optional = true }
 
 [dependencies]
 anyhow = "1.0"
