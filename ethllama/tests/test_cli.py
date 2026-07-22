@@ -3,8 +3,10 @@ import json
 import os
 import struct
 import tempfile
+import textwrap
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from ethllama.cli import main
 from ethllama.cli_mgmt import register_commands, _read_gguf_metadata
@@ -1796,3 +1798,1208 @@ def test_known_engines_has_minimum_set():
         )
 
 
+
+
+# ---------------------------------------------------------------------------
+# Tests for the llama.cpp noise filter (`_strip_llama_cpp_noise`) and
+# the `--debug` flag exposed by `ethllama run`.
+# ---------------------------------------------------------------------------
+
+from ethllama.inference import (
+    _strip_llama_cpp_noise,
+    _strip_cli_output,
+    _clean_chat_tokens,
+)
+
+
+def test_strip_llama_cpp_noise_filters_banner():
+    """The llama.cpp startup banner / log lines are stripped from output.
+
+    The banner block typically contains lines with markers like
+    ``llama_model_loader``, ``llm_load_tensors``,
+    ``llama_print_system_info``, ``model type``, ``model size``,
+    ``general.architecture``, ``print_info:`` etc.  None of these
+    should appear in the cleaned output; the response text should
+    survive verbatim.
+    """
+    raw = (
+        "llama_model_loader: loaded meta data with 28 key-value pairs and 291 tensors\n"
+        "llm_load_tensors: offloading 0 repeating layers to GPU\n"
+        "llm_load_tensors:        CPU buffer size =  2808.00 MiB\n"
+        "llama_print_system_info: CPU info: 8 cores, 16 threads\n"
+        "print_info:       n_ctx = 4096\n"
+        "print_info:       n_batch = 512\n"
+        "model type     = 7B\n"
+        "model size     = 3.8 GiB (3.84 BPW)\n"
+        "general.architecture = llama\n"
+        "system_info: AVX = 1 | AVX_VNNI = 0\n"
+        "sampling: temp = 0.700\n"
+        "generate: n_ctx = 4096, n_batch = 512, n_predict = 2048\n"
+        "\n"
+        "Hello! I am a friendly assistant. How can I help you today?\n"
+    )
+    cleaned = _strip_llama_cpp_noise(raw)
+    # All the banner / sampling / generate markers must be gone.
+    for marker in (
+        "llama_model_loader",
+        "llm_load_tensors",
+        "llama_print_system_info",
+        "print_info:",
+        "model type",
+        "model size",
+        "general.architecture",
+        "system_info:",
+        "sampling:",
+        "generate:",
+    ):
+        assert marker not in cleaned, (
+            f"Banner marker {marker!r} leaked through: {cleaned!r}"
+        )
+    # The actual response text must be preserved.
+    assert "Hello! I am a friendly assistant. How can I help you today?" in cleaned
+
+
+def test_strip_llama_cpp_noise_filters_exiting():
+    """`Exiting...` / `cleaning up` / `exit code:` lines are filtered out."""
+    raw = (
+        "llama_model_loader: loaded\n"
+        "\n"
+        "The response to your question.\n"
+        "\n"
+        "main: exiting...\n"
+        "cleaning up\n"
+        "exit code: 0\n"
+    )
+    cleaned = _strip_llama_cpp_noise(raw)
+    assert "The response to your question." in cleaned
+    assert "exiting" not in cleaned.lower()
+    assert "cleaning up" not in cleaned.lower()
+    assert "exit code" not in cleaned.lower()
+
+
+def test_strip_llama_cpp_noise_strips_chat_tokens():
+    """Chat template tokens like `<|im_start|>` and `[Start thinking]` are stripped.
+
+    The realistic case: the prompt is wrapped in chat-template tokens
+    (which the model echoes back to stdout because the binary doesn't
+    strip them), and the actual model response comes after the closing
+    ``<|im_end|>``.  After filtering, the response should be clean and
+    the chat-template tokens gone.
+    """
+    raw = (
+        "<|im_start|>user\n"
+        "What is 2+2?<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<|im_end|>\n"
+        "The answer is 4.\n"
+    )
+    cleaned = _clean_chat_tokens(raw)
+    # No chat-template control tokens should survive.
+    assert "<|im_start|>" not in cleaned
+    assert "<|im_end|>" not in cleaned
+    # The actual response text must still be there.
+    assert "The answer is 4." in cleaned
+    # And the user prompt itself should be gone (it was inside a chat block).
+    assert "What is 2+2?" not in cleaned
+
+
+def test_strip_llama_cpp_noise_strips_bracket_thinking_tokens():
+    """`[Start thinking]` and `[End thinking]` style markers are stripped."""
+    raw = (
+        "[Start thinking]\n"
+        "The answer is 4.\n"
+        "[End thinking]\n"
+        "Final answer: 4.\n"
+    )
+    cleaned = _clean_chat_tokens(raw)
+    assert "[Start thinking]" not in cleaned
+    assert "[End thinking]" not in cleaned
+    # Surrounding text survives
+    assert "The answer is 4." in cleaned
+    assert "Final answer: 4." in cleaned
+
+
+def test_strip_llama_cpp_noise_strips_im_start_end_blocks():
+    """`<|im_start|>...<|im_end|>` blocks are stripped entirely (including
+    the multi-line turn content)."""
+    raw = (
+        "Pre-text.\n"
+        "<|im_start|>user\n"
+        "hidden user turn\n"
+        "<|im_end|>\n"
+        "Post-text.\n"
+    )
+    cleaned = _clean_chat_tokens(raw)
+    assert "Pre-text." in cleaned
+    assert "Post-text." in cleaned
+    # The hidden turn must be gone (both its content and the delimiters)
+    assert "hidden user turn" not in cleaned
+    assert "<|im_start|>" not in cleaned
+    assert "<|im_end|>" not in cleaned
+
+
+def test_strip_llama_cpp_noise_debug_keeps_everything():
+    """`debug=True` returns the input unchanged (no filtering at all)."""
+    raw = (
+        "llama_model_loader: blah\n"
+        "Exiting...\n"
+        "<|im_start|>garbage<|im_end|>\n"
+    )
+    out = _strip_llama_cpp_noise(raw, debug=True)
+    assert out == raw
+
+
+def test_strip_cli_output_handles_nested_prompt_echo():
+    """`_strip_cli_output` recognises the `> > {prompt}` nested form."""
+    raw = (
+        "llama_model_loader: blah\n"
+        "> > Hello world\n"
+        "I am doing well.\n"
+    )
+    out = _strip_cli_output(raw, "Hello world")
+    assert "I am doing well." in out
+    assert "> >" not in out
+    assert "Hello world" not in out
+
+
+def test_strip_cli_output_handles_chat_prefix_echo():
+    """`_strip_cli_output` recognises the `[user]: {prompt}` form."""
+    raw = (
+        "llama_model_loader: blah\n"
+        "[user]: Hi there\n"
+        "Greetings, friend!\n"
+    )
+    out = _strip_cli_output(raw, "Hi there")
+    assert "Greetings, friend!" in out
+    assert "[user]:" not in out
+
+
+def test_strip_cli_output_debug_returns_raw():
+    """`_strip_cli_output(..., debug=True)` returns the raw stdout."""
+    raw = (
+        "llama_model_loader: blah\n"
+        "> Hello\n"
+        "Hi!\n"
+    )
+    out = _strip_cli_output(raw, "Hello", debug=True)
+    # debug mode: nothing filtered, returned as-is (stripped only).
+    assert "llama_model_loader: blah" in out
+    assert "> Hello" in out
+    assert "Hi!" in out
+
+
+def test_run_help_shows_debug_flag():
+    """`ethllama run --help` documents the new --debug flag."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--help"])
+    assert result.exit_code == 0
+    # The flag itself must be listed in the help output.
+    assert "--debug" in result.output
+    # And the help text should explain what it does.
+    out_lower = result.output.lower()
+    assert "raw" in out_lower or "debug" in out_lower
+
+
+def test_run_passes_debug_to_inference(tmp_path, monkeypatch):
+    """`ethllama run --debug` forwards ``debug=True`` to run_inference."""
+
+    # Isolate the model index so the fake model can't be picked up from
+    # the user's real ~/.ethllama/index.json.
+    from ethllama import index as index_mod
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+
+    model_path = tmp_path / "debug-test-model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    captured: dict = {}
+    monkeypatch.setattr("ethllama.inference.has_inference_engine", lambda: True)
+
+    def fake_run_inference(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("ethllama.inference.run_inference", fake_run_inference)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hello", "--debug"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured.get("debug") is True, (
+        f"Expected debug=True to be forwarded to run_inference; "
+        f"got {captured.get('debug')!r}"
+    )
+
+    # And without --debug, the default is False.
+    captured.clear()
+    result2 = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hello"]
+    )
+    assert result2.exit_code == 0, result2.output
+    assert captured.get("debug") is False, (
+        f"Expected debug=False by default; got {captured.get('debug')!r}"
+    )
+
+
+def test_run_stream_passes_debug_to_stream(tmp_path, monkeypatch):
+    """`ethllama run --debug --stream` forwards debug=True to run_inference_stream."""
+
+    from ethllama import index as index_mod
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+
+    model_path = tmp_path / "stream-debug.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+
+    captured: dict = {}
+    monkeypatch.setattr("ethllama.inference.has_inference_engine", lambda: True)
+
+    def fake_stream(**kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    monkeypatch.setattr("ethllama.inference.run_inference_stream", fake_stream)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", str(model_path), "-p", "Hi", "--stream", "--debug"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured.get("debug") is True
+    # And the streamed chunk should still appear in the output.
+    assert "chunk" in result.output
+
+
+def test_repl_session_stores_debug_flag():
+    """`REPLSession(..., debug=True)` retains the flag and forwards it
+    to ``run_inference_stream`` when ``send()`` is called."""
+    from ethllama.inference import REPLSession
+
+    captured: dict = []
+
+    def fake_stream(**kwargs):
+        captured.append(kwargs)
+        # yield nothing so the REPL doesn't have anything to display
+        if False:
+            yield ""
+
+    class FakeEngine:
+        @staticmethod
+        def __call__():
+            return True
+
+    # Replace has_inference_engine + run_inference_stream with our stubs.
+    import ethllama.inference as inf_mod
+    monkey = __import__("pytest").MonkeyPatch()
+    try:
+        monkey.setattr(inf_mod, "has_inference_engine", lambda: True)
+        monkey.setattr(inf_mod, "run_inference_stream", fake_stream)
+
+        session = REPLSession("/tmp/fake.gguf", debug=True)
+        assert session.debug is True
+
+        # Drive one user turn and ensure debug was forwarded.
+        for _ in session.send("Hello"):
+            pass
+        assert captured, "run_inference_stream was not called"
+        assert captured[-1].get("debug") is True
+
+        # Now without --debug.
+        captured.clear()
+        session2 = REPLSession("/tmp/fake.gguf")
+        assert session2.debug is False
+        for _ in session2.send("Hello"):
+            pass
+        assert captured[-1].get("debug") is False
+    finally:
+        monkey.undo()
+
+
+# ---------------------------------------------------------------------------
+# `ethllama setup` — guided setup / onboarding wizard
+# ---------------------------------------------------------------------------
+
+
+def test_setup_help_shows_options():
+    """`ethllama setup --help` lists all the wizard options."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--help"])
+    assert result.exit_code == 0
+    out = result.output
+    # All required options are documented.
+    assert "--service-mode" in out
+    assert "--binary-dir" in out
+    assert "--port" in out
+    assert "--api-key" in out
+    assert "--no-install" in out
+    assert "--yes" in out or "-y" in out
+    # The help text describes the wizard steps.
+    assert "interactive" in out.lower() or "wizard" in out.lower()
+
+
+def test_setup_appears_in_main_help():
+    """`ethllama setup` is listed in the main group help output."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "setup" in result.output
+
+
+def test_setup_no_install_skips_service(monkeypatch, tmp_path):
+    """`ethllama setup --no-install --yes` only writes config; no systemctl calls."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    # Isolate the config file so we don't touch the user's real one.
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+    monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
+
+    # Record every subprocess call; the only one allowed during
+    # `--no-install --yes` is the `sudo -n true` probe used by _can_sudo.
+    calls: list = []
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = b""
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        # Pretend sudo isn't available; forces the wizard down the
+        # no-sudo path without spawning a real subprocess.
+        return _Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--no-install", "--yes"])
+    assert result.exit_code == 0, result.output
+    # The wizard wrote the config file.
+    assert (tmp_path / "config.yaml").exists()
+    # And it includes the default port.
+    import yaml
+    with open(tmp_path / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["api"]["port"] == 10434
+    # Only the `sudo -n true` probe from _can_sudo was allowed; nothing
+    # that actually touches systemd (systemctl, sudo cp, etc.) ran.
+    bad = [c for c in calls if not (len(c) >= 1 and c[0] == "sudo" and len(c) >= 2 and c[1] == "-n")]
+    assert bad == [], f"Unexpected subprocess calls: {bad}"
+
+
+def test_setup_no_install_saves_binary_dir(monkeypatch, tmp_path):
+    """`ethllama setup --no-install --binary-dir <path> --yes` records the dir."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+    monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = b""
+
+    calls: list = []
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["setup", "--no-install", "--yes", "--binary-dir", "/opt/llama.cpp/build/bin"],
+    )
+    assert result.exit_code == 0, result.output
+
+    import yaml
+    with open(tmp_path / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["engines"]["binary_dir"] == "/opt/llama.cpp/build/bin"
+    assert cfg["api"]["port"] == 10434
+    # No systemctl / sudo-cp / sudo systemctl invocations happened.
+    bad = [c for c in calls if not (len(c) >= 1 and c[0] == "sudo" and len(c) >= 2 and c[1] == "-n")]
+    assert bad == [], f"Unexpected subprocess calls: {bad}"
+
+
+def test_setup_preserves_existing_config(monkeypatch, tmp_path):
+    """Re-running `setup --no-install --yes` does not clobber unrelated keys."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+    monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
+
+    # Seed an existing config with a custom key.
+    import yaml
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "gpu": {"backend": "cuda", "fallback": False},
+        "custom_key": "do-not-touch",
+        "model_defaults": {"phi-4": {"temperature": 0.3}},
+    }))
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = b""
+
+    calls: list = []
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--no-install", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    with open(tmp_path / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    # Pre-existing keys are preserved.
+    assert cfg["custom_key"] == "do-not-touch"
+    assert cfg["model_defaults"] == {"phi-4": {"temperature": 0.3}}
+    assert cfg["gpu"]["backend"] == "cuda"
+    # The wizard wrote the new keys.
+    assert cfg["api"]["port"] == 10434
+    # No real service-install calls happened.
+    bad = [c for c in calls if not (len(c) >= 1 and c[0] == "sudo" and len(c) >= 2 and c[1] == "-n")]
+    assert bad == [], f"Unexpected subprocess calls: {bad}"
+
+
+def test_can_sudo_detects_availability(monkeypatch):
+    """`_can_sudo` returns True when `sudo -n true` exits 0, False otherwise."""
+    import ethllama.cli as cli_mod
+
+    class _Result:
+        def __init__(self, rc): self.returncode = rc
+
+    # No sudo binary: returns False.
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _x: None)
+    assert cli_mod._can_sudo() is False
+
+    # sudo present and returns 0: returns True.
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _x: "/usr/bin/sudo")
+    monkeypatch.setattr(
+        cli_mod.subprocess, "run",
+        lambda *a, **kw: _Result(0),
+    )
+    assert cli_mod._can_sudo() is True
+
+    # sudo present but returns non-zero: returns False.
+    monkeypatch.setattr(
+        cli_mod.subprocess, "run",
+        lambda *a, **kw: _Result(1),
+    )
+    assert cli_mod._can_sudo() is False
+
+    # sudo present but raises FileNotFoundError: returns False.
+    def _raise_fnf(*a, **kw):
+        raise FileNotFoundError("no sudo")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", _raise_fnf)
+    assert cli_mod._can_sudo() is False
+
+
+def test_quick_discover_finds_engines_on_path(monkeypatch, tmp_path):
+    """`_quick_discover` returns only the engines currently on PATH."""
+    import ethllama.cli as cli_mod
+    from ethllama.engines import KNOWN_ENGINES
+
+    # Build a fake bin dir with a couple of fake engine binaries.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("llama-cli", "ollama"):
+        (fake_bin / name).write_text("#!/bin/sh\nexit 0")
+    (fake_bin / "llama-cli").chmod(0o755)
+    (fake_bin / "ollama").chmod(0o755)
+
+    # Make shutil.which(name) pretend these two exist, others don't.
+    def fake_which(name):
+        if name in ("llama-cli", "ollama"):
+            return str(fake_bin / name)
+        return None
+
+    monkeypatch.setattr(cli_mod.shutil, "which", fake_which)
+    found = cli_mod._quick_discover()
+    assert "llama-cli" in found
+    assert "ollama" in found
+    # It must be a strict subset of KNOWN_ENGINES (only those keys are scanned).
+    assert set(found.keys()) <= set(KNOWN_ENGINES.keys())
+
+
+def test_setup_user_mode_calls_systemctl_user(monkeypatch, tmp_path):
+    """`--service-mode user` invokes systemctl --user (and not sudo systemctl)."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    # Provide a service file so the install helper does not bail out.
+    user_svc = cli_mod._SYSTEMD_DIR / "ethllama-user.service"
+    user_svc.parent.mkdir(parents=True, exist_ok=True)
+    if not user_svc.exists():
+        user_svc.write_text("[Unit]\n[Service]\n[Install]\n")
+
+    # Record subprocess calls.
+    calls: list = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = b""
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    # The home dir is /tmp/.../home -- fake Path.home()
+    fake_home = tmp_path
+    monkeypatch.setattr(cli_mod.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setattr(cli_mod.os, "environ", {"USER": "tester", "LOGNAME": "tester"})
+
+    # Drive _install_user_service directly so we can assert the
+    # systemctl --user invocation.
+    ok = cli_mod._install_user_service(10434, "")
+    assert ok is True, calls
+    # All captured systemctl commands used --user.
+    systemctl_calls = [c for c in calls if "systemctl" in c]
+    assert systemctl_calls, calls
+    assert all("--user" in c for c in systemctl_calls), calls
+    # None of the user-mode install commands invoked sudo.
+    assert all("sudo" not in c for c in calls), calls
+
+
+def test_setup_service_mode_skip_skips_install(monkeypatch, tmp_path):
+    """`--service-mode skip` writes the config but never touches systemd."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+    monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = b""
+
+    calls: list = []
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["setup", "--service-mode", "skip", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    # The wizard explicitly noted the skip in its output.
+    assert "skipped" in result.output.lower() or "skip" in result.output.lower()
+    # No real service-install calls happened.
+    bad = [c for c in calls if not (len(c) >= 1 and c[0] == "sudo" and len(c) >= 2 and c[1] == "-n")]
+    assert bad == [], f"Unexpected subprocess calls: {bad}"
+
+
+def test_setup_bails_when_ethllama_not_on_path(monkeypatch, tmp_path):
+    """`ethllama setup` exits early with a helpful error when the binary
+    is missing from PATH (the wizard cannot install a service for a CLI
+    the user doesn't even have)."""
+    import ethllama.cli as cli_mod
+    import ethllama.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+    monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
+
+    # Make shutil.which("ethllama") return None so the wizard bails.
+    def fake_which(name, *args, **kwargs):
+        if name == "ethllama":
+            return None
+        return None
+
+    monkeypatch.setattr(cli_mod.shutil, "which", fake_which)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--no-install", "--yes"])
+    # The wizard exits non-zero and the user sees a useful message.
+    assert result.exit_code != 0
+    out = (result.output or "").lower()
+    assert "ethllama" in out
+    assert "path" in out
+    # And it does NOT touch the config file.
+    assert not (tmp_path / "config.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# `ethllama profile` — model profiles subcommand group
+# ---------------------------------------------------------------------------
+
+from ethllama import profiles as profiles_mod
+from ethllama.cli_profile import register_commands as register_profile
+
+# Wire the profile subcommand onto the main group so the tests can
+# invoke it via the standard `ethllama profile ...` syntax.
+register_profile(main)
+
+
+@pytest.fixture
+def tmp_profiles_dir(tmp_path, monkeypatch):
+    """Redirect ``profiles.PROFILES_DIR`` to a fresh tmp directory."""
+    target = tmp_path / "profiles"
+    target.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(profiles_mod, "PROFILES_DIR", target)
+    return target
+
+
+def test_profile_help_lists_subcommands():
+    """`ethllama profile --help` lists all six subcommands."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "--help"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for cmd in ("create", "list", "show", "edit", "delete", "run"):
+        assert cmd in out, f"Missing subcommand: {cmd}"
+
+
+def test_profile_list_empty(tmp_profiles_dir):
+    """`ethllama profile list` on an empty dir prints a helpful message."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "No profiles" in result.output or "profile create" in result.output
+
+
+def test_profile_list_shows_existing(tmp_profiles_dir):
+    """`ethllama profile list` displays the configured profiles."""
+    from ethllama.profiles import Profile
+    Profile(name="alpha", model="/a.gguf", description="first").save(
+        profiles_dir=tmp_profiles_dir
+    )
+    Profile(name="beta", model="/b.gguf").save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "alpha" in result.output
+    assert "beta" in result.output
+    assert "first" in result.output  # description
+    # Sorted alphabetically
+    assert result.output.index("alpha") < result.output.index("beta")
+
+
+def test_profile_list_json_format(tmp_profiles_dir):
+    """`ethllama profile list --json` outputs a JSON envelope."""
+    from ethllama.profiles import Profile
+    Profile(name="only", model="/m.gguf").save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data == {"profiles": ["only"]}
+
+
+def test_profile_create_writes_yaml(tmp_profiles_dir):
+    """`ethllama profile create` writes a profile YAML to disk."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "profile", "create", "chat-py",
+            "--model", "/path/to/model.gguf",
+            "--temperature", "0.3",
+            "--top-p", "0.9",
+            "--top-k", "30",
+            "--max-tokens", "2048",
+            "--system-prompt", "You are a Python expert.",
+            "--description", "Coding profile",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "saved to" in result.output.lower()
+
+    # The file should be there with the right content
+    yaml_path = tmp_profiles_dir / "chat-py.yaml"
+    assert yaml_path.exists()
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    assert data["name"] == "chat-py"
+    assert data["model"] == "/path/to/model.gguf"
+    assert data["description"] == "Coding profile"
+    assert data["parameters"]["temperature"] == 0.3
+    assert data["parameters"]["top_p"] == 0.9
+    assert data["parameters"]["top_k"] == 30
+    assert data["parameters"]["max_tokens"] == 2048
+    assert data["system_prompt"] == "You are a Python expert."
+
+
+def test_profile_create_rejects_existing_without_overwrite(tmp_profiles_dir):
+    """`profile create` refuses to overwrite without --overwrite."""
+    from ethllama.profiles import Profile
+    Profile(name="dup", model="/m.gguf").save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["profile", "create", "dup", "--model", "/other.gguf"],
+    )
+    assert result.exit_code != 0
+    assert "already exists" in result.output.lower()
+
+
+def test_profile_create_overwrite_replaces(tmp_profiles_dir):
+    """`profile create --overwrite` replaces the existing YAML."""
+    from ethllama.profiles import Profile
+    Profile(name="dup", model="/old.gguf").save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "profile", "create", "dup",
+            "--model", "/new.gguf",
+            "--overwrite",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    loaded = Profile.from_yaml(tmp_profiles_dir / "dup.yaml")
+    assert loaded.model == "/new.gguf"
+
+
+def test_profile_create_from_yaml(tmp_profiles_dir, tmp_path):
+    """`profile create --from-yaml` reads an existing YAML file."""
+    source = tmp_path / "source.yaml"
+    source.write_text(
+        textwrap.dedent("""\
+            name: original
+            model: /source-model.gguf
+            parameters:
+              temperature: 0.11
+            description: from source
+        """),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "profile", "create", "renamed",
+            "--from-yaml", str(source),
+            "--model", "/override-model.gguf",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    loaded = profiles_mod.load_profile("renamed", profiles_dir=tmp_profiles_dir)
+    assert loaded.name == "renamed"  # re-stamped
+    assert loaded.model == "/override-model.gguf"  # CLI override
+    assert loaded.parameters["temperature"] == 0.11
+    assert loaded.description == "from source"
+
+
+def test_profile_show_displays_yaml(tmp_profiles_dir):
+    """`ethllama profile show` displays the profile details."""
+    from ethllama.profiles import Profile
+    Profile(
+        name="chat-py",
+        model="/m.gguf",
+        description="Demo",
+        parameters={"temperature": 0.3, "top_k": 20},
+        system_prompt="You are terse.",
+        template="{{ .Prompt }}",
+        stop=["</s>"],
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "show", "chat-py"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "chat-py" in out
+    assert "/m.gguf" in out
+    assert "Demo" in out
+    assert "temperature: 0.3" in out
+    assert "top_k: 20" in out
+    assert "You are terse." in out
+    assert "{{ .Prompt }}" in out
+    assert "</s>" in out
+
+
+def test_profile_show_missing_exits_non_zero(tmp_profiles_dir):
+    """`ethllama profile show <missing>` exits with a clear error."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "show", "ghost"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+def test_profile_show_json(tmp_profiles_dir):
+    """`ethllama profile show --json` outputs the full profile as JSON."""
+    from ethllama.profiles import Profile
+    Profile(
+        name="json-demo",
+        model="/m.gguf",
+        parameters={"temperature": 0.4},
+        stop=["<e>"],
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "show", "json-demo", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["name"] == "json-demo"
+    assert data["model"] == "/m.gguf"
+    assert data["parameters"] == {"temperature": 0.4}
+    assert data["stop"] == ["<e>"]
+
+
+def test_profile_delete_removes_file(tmp_profiles_dir):
+    """`ethllama profile delete --yes` removes the YAML."""
+    from ethllama.profiles import Profile
+    Profile(name="byebye", model="/m.gguf").save(profiles_dir=tmp_profiles_dir)
+    assert (tmp_profiles_dir / "byebye.yaml").exists()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["profile", "delete", "byebye", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+    assert not (tmp_profiles_dir / "byebye.yaml").exists()
+
+
+def test_profile_delete_missing_exits_non_zero(tmp_profiles_dir):
+    """`ethllama profile delete <missing>` exits non-zero with a message."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["profile", "delete", "ghost", "--yes"]
+    )
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+def test_profile_edit_missing_exits_non_zero(tmp_profiles_dir, monkeypatch):
+    """`ethllama profile edit <missing>` exits non-zero."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "edit", "ghost"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+def test_profile_edit_opens_editor(tmp_profiles_dir, monkeypatch):
+    """`ethllama profile edit` execs into $EDITOR (captured via monkeypatch)."""
+    from ethllama.profiles import Profile
+    Profile(name="edit-me", model="/m.gguf").save(profiles_dir=tmp_profiles_dir)
+
+    captured: dict = {}
+
+    def fake_execvp(file, args):
+        captured["file"] = file
+        captured["args"] = args
+        # Don't actually exec; raise SystemExit so the test continues.
+        raise SystemExit(0)
+
+    monkeypatch.setattr("ethllama.cli_profile.os.execvp", fake_execvp)
+
+    runner = CliRunner()
+    # Click's CliRunner will surface SystemExit, but we don't care
+    # about the exit code; we care that execvp was called.
+    runner.invoke(main, ["profile", "edit", "edit-me"], catch_exceptions=False)
+
+    assert captured.get("file") is not None
+    assert captured["args"][-1].endswith("edit-me.yaml")
+
+
+def test_run_with_profile_applies_parameters(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """`ethllama run --profile <name>` applies the profile's parameters."""
+    from ethllama.profiles import Profile
+    from ethllama import index as index_mod
+
+    # Set up a fake model + index
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+
+    # Save a profile
+    Profile(
+        name="chat-py",
+        model="model.gguf",
+        parameters={"temperature": 0.3, "top_k": 20, "n_gpu_layers": 7},
+        system_prompt="You are helpful.",
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    # Capture run_inference
+    captured: dict = {}
+    import ethllama.inference as inf_mod
+    monkeypatch.setattr(inf_mod, "has_inference_engine", lambda: True)
+    monkeypatch.setattr(
+        inf_mod, "run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run", str(model_path),
+            "-p", "Hello",
+            "--profile", "chat-py",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Profile parameters should be applied
+    assert captured.get("temperature") == 0.3
+    assert captured.get("top_k") == 20
+    assert captured.get("n_gpu_layers") == 7
+    # The system prompt should have been prepended
+    assert "You are helpful." in captured.get("prompt", "")
+    # The CLI should mention which profile was used
+    assert "Profile: chat-py" in result.output
+
+
+def test_run_with_profile_explicit_flag_overrides(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """Explicit CLI flags win over profile parameters."""
+    from ethllama.profiles import Profile
+    from ethllama import index as index_mod
+
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+
+    Profile(
+        name="p",
+        model="model.gguf",
+        parameters={"temperature": 0.3, "top_k": 20},
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    captured: dict = {}
+    import ethllama.inference as inf_mod
+    monkeypatch.setattr(inf_mod, "has_inference_engine", lambda: True)
+    monkeypatch.setattr(
+        inf_mod, "run_inference",
+        lambda **kw: (captured.update(kw) or "ok"),
+    )
+
+    runner = CliRunner()
+    # User passes --temperature 0.9 explicitly; top_k stays at default
+    # so the profile value (20) should be used.
+    result = runner.invoke(
+        main,
+        [
+            "run", str(model_path),
+            "-p", "Hi",
+            "--profile", "p",
+            "--temperature", "0.9",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured.get("temperature") == 0.9  # explicit flag wins
+    assert captured.get("top_k") == 20  # profile fills in
+
+
+def test_run_with_profile_missing_exits_non_zero(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """`--profile <missing>` exits non-zero with a clear message."""
+    from ethllama import index as index_mod
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run", str(model_path),
+            "-p", "Hello",
+            "--profile", "does-not-exist",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+def test_run_help_shows_profile_option():
+    """`ethllama run --help` documents the --profile option."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--help"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "--profile" in out
+    assert "-P" in out
+
+
+def test_serve_help_shows_profile_option():
+    """`ethllama serve --help` documents the --profile option."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["serve", "--help"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "--profile" in out
+    assert "-P" in out
+
+
+def test_serve_with_profile_applies_parameters(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """`ethllama serve --profile <name>` applies the profile to GPU config."""
+    import builtins
+    from ethllama import index as index_mod
+    from ethllama.profiles import Profile
+    import ethllama.inference as inf_mod
+    import ethllama.cli as cli_mod
+
+    # Fake model
+    model_path = tmp_path / "m.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+
+    Profile(
+        name="serve-prof",
+        model="m.gguf",
+        parameters={"n_gpu_layers": 42, "threads": 7},
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    captured_gpu: dict = {}
+    monkeypatch.setattr(
+        inf_mod, "set_gpu_config", lambda **kw: captured_gpu.update(kw)
+    )
+
+    captured_serve: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured_serve.update(kwargs)
+        raise KeyboardInterrupt()
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        mod = real_import(name, *a, **kw)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: str(model_path))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "serve", "--profile", "serve-prof",
+            "--host", "127.0.0.1", "--port", "1",
+        ],
+    )
+
+    # Profile's parameters should have been applied via set_gpu_config
+    assert captured_gpu.get("n_gpu_layers") == 42
+    assert captured_gpu.get("n_threads") == 7
+    # The profile's model was picked up because --model was not given
+    assert captured_serve.get("model_path") == str(model_path)
+
+
+def test_serve_with_profile_explicit_model_wins(tmp_profiles_dir, tmp_path, monkeypatch):
+    """Explicit --model wins over the profile's model."""
+    import builtins
+    from ethllama import index as index_mod
+    from ethllama.profiles import Profile
+    import ethllama.inference as inf_mod
+    import ethllama.cli as cli_mod
+
+    model_path = tmp_path / "m.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+
+    Profile(
+        name="p",
+        model="ignored-model.gguf",
+        parameters={"n_gpu_layers": 5},
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    captured_gpu: dict = {}
+    monkeypatch.setattr(
+        inf_mod, "set_gpu_config", lambda **kw: captured_gpu.update(kw)
+    )
+
+    captured_serve: dict = {}
+
+    def fake_run_server(*args, **kwargs):
+        captured_serve.update(kwargs)
+        raise KeyboardInterrupt()
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        mod = real_import(name, *a, **kw)
+        if name.endswith("api") or name == "ethllama.api":
+            mod.run_server = fake_run_server
+        return mod
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "serve", "--profile", "p", "--model", str(model_path),
+            "--host", "127.0.0.1", "--port", "1",
+        ],
+    )
+
+    # The explicit --model takes precedence
+    assert captured_serve.get("model_path") == str(model_path)
+    # But the profile's parameters still apply
+    assert captured_gpu.get("n_gpu_layers") == 5
+
+
+def test_profile_in_main_help():
+    """The `profile` command group appears in the main help output."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "profile" in result.output
+
+
+def test_profile_apply_to_kwargs_preserves_explicit_values():
+    """`apply_profile_to_kwargs` does not override explicit non-None values."""
+    from ethllama.cli_profile import apply_profile_to_kwargs
+    from ethllama.profiles import Profile
+
+    p = Profile(
+        name="x",
+        model="/m.gguf",
+        parameters={"temperature": 0.3, "top_k": 20},
+    )
+    out = apply_profile_to_kwargs(p, {"temperature": 0.99, "top_p": 0.5})
+    # Explicit non-None wins
+    assert out["temperature"] == 0.99
+    # None values get filled in
+    assert out["top_k"] == 20
+    # top_p was not in the profile, so it stays as the caller set it
+    assert out["top_p"] == 0.5
+
+
+def test_profile_apply_to_kwargs_ignores_none_values_in_profile():
+    """Profile parameters that are explicitly None are skipped."""
+    from ethllama.cli_profile import apply_profile_to_kwargs
+    from ethllama.profiles import Profile
+
+    p = Profile(
+        name="x",
+        model="/m.gguf",
+        parameters={"temperature": None, "top_k": 20},
+    )
+    out = apply_profile_to_kwargs(p, {"temperature": 0.5})
+    # Profile value is None, so it doesn't override
+    assert out["temperature"] == 0.5
+    assert out["top_k"] == 20

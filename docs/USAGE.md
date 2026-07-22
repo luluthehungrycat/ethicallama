@@ -573,6 +573,129 @@ ethllama run stories15M.bin
 ````
 
 
+## Model profiles
+
+A **profile** is a reusable preset of inference parameters (system
+prompt, temperature, chat template, stop sequences, …) bound to a
+model by name.  Profiles are the ethicallama equivalent of
+[Ollama's Modelfile](https://github.com/ollama/ollama/blob/main/docs/modelfile.md),
+but they do **not** copy the underlying GGUF file: the model is
+referenced by index name or absolute path, and the parameters are
+applied at runtime.  Switching between "Python coding" and "creative
+writing" personas is just a flag change, no extra gigabytes on disk.
+
+### Where profiles live
+
+Profiles are stored as YAML files in `~/.ethllama/profiles/<name>.yaml`.
+The directory is created on demand when you save your first profile.
+
+### Creating a profile
+
+```bash
+ethllama profile create chat-python \
+  --model Qwen3.5-0.8B-UD-IQ2_XXS \
+  --temperature 0.3 \
+  --top-p 0.9 \
+  --top-k 30 \
+  --max-tokens 2048 \
+  --n-gpu-layers -1 \
+  --ctx-size 4096 \
+  --system-prompt "You are an expert Python developer. Use type hints." \
+  --description "Default profile for Python coding help"
+```
+
+The `--model` value is either an indexed model stem (looked up in
+`~/.ethllama/index.json`) or an absolute path to a GGUF file.  All
+other parameters are optional.
+
+### YAML format
+
+The same file format is produced by `profile show` and consumed by
+`profile run`, so you can also edit it directly with your favorite
+editor (or `ethllama profile edit <name>`, which opens it in `$EDITOR`):
+
+```yaml
+name: chat-python
+description: Default profile for Python coding help
+model: Qwen3.5-0.8B-UD-IQ2_XXS   # index stem OR absolute path
+parameters:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 2048
+  n_gpu_layers: -1
+  ctx_size: 4096
+system_prompt: |
+  You are an expert Python developer. Always explain your code.
+  Use type hints. Prefer standard library. Keep answers concise.
+template: |
+  <|im_start|>system
+  {{ .System }}<|im_end|>
+  <|im_start|>user
+  {{ .Prompt }}<|im_end|>
+  <|im_start|>assistant
+  {{ .Response }}<|im_end|>
+stop:
+  - "<|im_end|>"
+  - "<|im_start|>"
+```
+
+Recognised `parameters` keys mirror the `ethllama run` flags:
+`temperature`, `top_p`, `top_k`, `max_tokens`, `n_gpu_layers`,
+`ctx_size`, `threads`, `gpu_backend`.  Unknown keys are preserved on
+round-trip but ignored by the CLI.
+
+### Running with a profile
+
+Two ways:
+
+```bash
+# Direct:  `ethllama run <model> --profile <name>`
+ethllama run Qwen3.5-0.8B-UD-IQ2_XXS -p "How do I cache a function in Python?" --profile chat-python
+
+# Profile-driven:  `ethllama profile run <name> --prompt ...`
+# (the model is taken from the profile itself)
+ethllama profile run chat-python -p "How do I cache a function in Python?"
+```
+
+The profile's parameters act as **fallbacks**: any explicit CLI flag
+you pass on the command line wins.  So `ethllama run <model>
+--profile chat-python --temperature 0.7` uses `0.7` for the
+temperature but everything else from the profile.
+
+The same `--profile` flag works for `ethllama serve` to pre-apply the
+profile's settings to the pre-loaded model:
+
+```bash
+ethllama serve --profile chat-python --port 10434
+```
+
+### Other profile commands
+
+```bash
+ethllama profile list                # list all configured profiles
+ethllama profile show <name>         # show the YAML (or --json)
+ethllama profile edit <name>         # open in $EDITOR
+ethllama profile delete <name>       # remove (prompts for confirmation)
+```
+
+Use `ethllama profile list --json` for machine-readable output
+suitable for scripting.
+
+### Comparison to Ollama's Modelfile
+
+| Concern              | Ollama Modelfile               | ethicallama profile            |
+|----------------------|--------------------------------|--------------------------------|
+| Storage              | Separate copy of GGUF + Modelfile | One YAML referencing the model |
+| Disk overhead        | 1× GGUF per Modelfile          | None (the GGUF is shared)      |
+| Storage format       | Plain-text DSL                 | YAML                           |
+| System prompt        | `SYSTEM`                       | `system_prompt`                |
+| Chat template        | `TEMPLATE`                     | `template` (Jinja2 inline)     |
+| Parameters           | `PARAMETER <key> <value>`      | `parameters:` mapping          |
+| Stop sequences       | `PARAMETER stop <seq>`         | `stop:` list                   |
+| Edit in $EDITOR      | `ollama edit <model>`          | `ethllama profile edit <name>`  |
+
+
 ## API Usage
 
 ### Starting the Server

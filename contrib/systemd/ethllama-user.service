@@ -1,0 +1,31 @@
+[Unit]
+Description=ethicallama — ethical, local-only LLM inference server (user instance)
+Documentation=https://github.com/luluthehungrycat/ethicallama
+After=network.target
+
+[Service]
+Type=simple
+# Run as the user that owns this unit (set automatically by systemd).
+User=%u
+WorkingDirectory=%h
+# PATH must include both system-wide and per-user binary locations so the
+# per-user `ethllama` install (uv tool install) is on PATH.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin"
+Environment="ETHLLAMA_CONFIG=%h/.ethllama/config.yaml"
+EnvironmentFile=-%h/.ethllama/ethllama.env
+ExecStart=%h/.local/bin/ethllama serve --host 127.0.0.1 --port 10434
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+# Hardening — read-only access to the rest of the home dir.  Reads are
+# required so the service can read user-installed tools from
+# %h/.local/share/uv/ and the per-user ethllama config.
+ProtectHome=read-only
+ProtectSystem=strict
+# Allow writes only to the ethllama data dir and the uv tool store.
+ReadWritePaths=%h/.ethllama %h/.local/share/uv
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
