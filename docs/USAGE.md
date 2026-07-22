@@ -264,7 +264,7 @@ Options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--host` | `127.0.0.1` | Bind address |
-| `--port` | `8080` | Port number |
+| `--port` | `10434` | Port number |
 | `--api-key` | `""` | API key for request authentication |
 
 Examples:
@@ -274,7 +274,7 @@ Examples:
 ethllama serve
 
 # Network-accessible server with API key
-ethllama serve --host 0.0.0.0 --port 8080 --api-key "sk-ethicallama-1234"
+ethllama serve --host 0.0.0.0 --port 10434 --api-key "YOUR_API_KEY"
 ```
 
 #### `config` -- Manage configuration
@@ -456,7 +456,7 @@ gpu:
 api:
   enabled: false           # Enable the API server on startup
   host: 127.0.0.1          # Bind address
-  port: 8080               # Port number
+  port: 10434               # Port number
   api_key: ""              # API key for auth (empty = no auth)
 
 # Telemetry
@@ -642,7 +642,7 @@ stop:
 
 Recognised `parameters` keys mirror the `ethllama run` flags:
 `temperature`, `top_p`, `top_k`, `max_tokens`, `n_gpu_layers`,
-`ctx_size`, `threads`, `gpu_backend`.  Unknown keys are preserved on
+`ctx_size`, `threads`, `gpu_backend`. `template` is inline unless it names an existing readable template file. Stop sequences and token limits are forwarded to native and supported custom engines. Unknown keys are preserved on
 round-trip but ignored by the CLI.
 
 ### Running with a profile
@@ -658,7 +658,7 @@ ethllama run Qwen3.5-0.8B-UD-IQ2_XXS -p "How do I cache a function in Python?" -
 ethllama profile run chat-python -p "How do I cache a function in Python?"
 ```
 
-The profile's parameters act as **fallbacks**: any explicit CLI flag
+Precedence is **explicit CLI option > profile > per-model defaults > application defaults**. An explicitly supplied default-valued option still wins. The profile's parameters act as **fallbacks**: any explicit CLI flag
 you pass on the command line wins.  So `ethllama run <model>
 --profile chat-python --temperature 0.7` uses `0.7` for the
 temperature but everything else from the profile.
@@ -701,7 +701,7 @@ suitable for scripting.
 ### Starting the Server
 
 ```bash
-ethllama serve --host 127.0.0.1 --port 8080 --api-key "sk-ethicallama-1234"
+ethllama serve --host 127.0.0.1 --port 10434 --api-key "YOUR_API_KEY"
 ```
 
 ### Endpoints
@@ -711,9 +711,9 @@ ethllama serve --host 127.0.0.1 --port 8080 --api-key "sk-ethicallama-1234"
 OpenAI-compatible chat completions endpoint.
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:10434/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-ethicallama-1234" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "model": "llama-model",
     "messages": [
@@ -729,9 +729,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 Simple text completions endpoint.
 
 ```bash
-curl -X POST http://localhost:8080/v1/completions \
+curl -X POST http://localhost:10434/v1/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-ethicallama-1234" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "model": "llama-model",
     "prompt": "Once upon a time",
@@ -745,8 +745,8 @@ curl -X POST http://localhost:8080/v1/completions \
 List available models.
 
 ```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer sk-ethicallama-1234"
+curl http://localhost:10434/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 #### GET /health
@@ -754,7 +754,7 @@ curl http://localhost:8080/v1/models \
 Health check endpoint.
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:10434/health
 ```
 
 #### `transcribe` -- Speech-to-text (whisper.cpp)
@@ -899,6 +899,13 @@ model_extensions:
 
 See `docs/examples/` for ready-to-use engine configuration files.
 
+`args_template` is parsed with quote-aware splitting and executed without a
+shell. It also receives `max_tokens`, `stop`, and `stop_sequences`; quote any
+value that may contain whitespace. `output_policy: llama.cpp` enables clean
+output (banner/prompt/control-token removal) in normal mode and raw stdout
+with `--debug`. Arbitrary engines default to `output_policy: raw`; their output
+is intentionally not interpreted, and `--debug` reports that policy.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -933,7 +940,7 @@ See `docs/examples/` for ready-to-use engine configuration files.
 Enable verbose output to get more information:
 
 ```bash
-ethllama --verbose run model.gguf --prompt "Hello"
+ethllama run model.gguf --prompt "Hello" --debug
 ```
 
 ### Log Files
@@ -944,39 +951,35 @@ Logs are written to `~/.ethllama/logs/`. Check these for detailed error informat
 
 ### Quick start with systemd
 
-The fastest way to run ethicallama as a network service:
+Generate a service from the installed CLI rather than copying a repository
+unit. User scope is the default and never invokes `sudo`:
 
-1. **Install the package:**
-   ```bash
-   pip install ethicallama
-   ```
+```bash
+ethllama setup
+systemctl --user status ethllama
+curl http://127.0.0.1:10434/health
+```
 
-2. **Configure the system user:**
-   ```bash
-   sudo useradd --system --shell /usr/sbin/nologin --home /var/lib/ethllama ethllama
-   sudo mkdir -p /var/lib/ethllama /etc/ethllama
-   sudo chown ethllama:ethllama /var/lib/ethllama
-   ```
+The generated unit uses the resolved executable and user configuration; it has
+no embedded API key. It only reports linger status and never enables it.
 
-3. **Install the systemd service:**
-   ```bash
-   sudo cp contrib/systemd/ethllama.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now ethllama
-   ```
+For an explicit PID-1 service, run the command as the intended non-root user:
 
-4. **Test the API:**
-   ```bash
-   curl http://localhost:10434/health
-   ```
+```bash
+ethllama setup --service-mode system
+```
 
-5. **Front it with nginx + Let's Encrypt** (optional):
-   ```bash
-   sudo cp contrib/nginx/ethllama.conf /etc/nginx/sites-available/
-   sudo ln -s /etc/nginx/sites-available/ethllama.conf /etc/nginx/sites-enabled/
-   sudo certbot --nginx -d ethllama.example.com
-   sudo systemctl restart nginx
-   ```
+System mode requires `sudo -n`, rejects root invocation, stores the generated
+configuration root-owned under `/etc/ethllama`, and supplies it via systemd
+credentials. It does not fall back to user mode if a prerequisite fails.
+
+**Front it with nginx + Let's Encrypt** (optional):
+```bash
+sudo cp contrib/nginx/ethllama.conf /etc/nginx/sites-available/
+sudo ln -s /etc/nginx/sites-available/ethllama.conf /etc/nginx/sites-enabled/
+sudo certbot --nginx -d ethllama.example.com
+sudo systemctl restart nginx
+```
 
 ### API extras required
 

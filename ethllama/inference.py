@@ -13,7 +13,7 @@ import struct
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional
 
 # Where our built binaries live (relative to this file's location)
 BUILD_BIN_DIR = (Path(__file__).resolve().parent.parent / "llama.cpp-build" / "bin")
@@ -326,14 +326,17 @@ def _find_prompt_echo(raw: str, prompt: str) -> int:
 
 
 def _clean_chat_tokens(line: str) -> str:
-    """Remove chat-template tokens from a line of model output.
+    """Remove chat control delimiters while preserving assistant content.
 
-    Strips:
-    - Paired ``<|im_start|>...<|im_end|>`` blocks (whole turns)
-    - Any stray ``<|xxx|>`` token
-    - ``[Start ...]`` / ``[/End]`` style control markers
+    Models sometimes wrap a response in ``<|im_start|>assistant`` and
+    ``<|im_end|>``.  Removing a whole paired block loses the generated reply,
+    so only delimiter tokens and role labels are removed here.
     """
-    line = re.sub(r"<\|im_start\|>.*?<\|im_end\|>", "", line, flags=re.DOTALL)
+    # Echoed user/system turns are not generated content. Remove those whole
+    # turns first, but keep an assistant turn's payload.
+    line = re.sub(r"<\|im_start\|>\s*(?:user|system)\s*\n.*?<\|im_end\|>", "", line, flags=re.DOTALL)
+    line = re.sub(r"<\|im_start\|>\s*assistant\s*", "", line)
+    line = re.sub(r"<\|im_end\|>", "", line)
     line = re.sub(r"<\|[a-z_]+\|>", "", line)
     line = re.sub(r"\[/?[A-Z][a-z]+(?: [a-z]+)*\]", "", line)
     return line
@@ -513,6 +516,106 @@ def run_inference(
     return cleaned if debug else _strip_spinner(cleaned)
 
 
+def _strip_prompt_echo_from_line(line: str, prompt: str) -> str:
+    """Remove a prompt echo from one stdout line without dropping a reply."""
+    echo_idx = _find_prompt_echo(line, prompt)
+    if echo_idx < 0:
+        return line
+    return line[:echo_idx] + line[echo_idx + len(prompt):]
+
+
+def _iter_stdout_chunks(stream: Any) -> Iterator[str]:
+    """Yield stdout as soon as one text character is available."""
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _needs_complete_stream_line(fragment: str, prompt: str) -> bool:
+    """Return whether a prefix must stay buffered for clean-mode filtering."""
+    stripped = fragment.lstrip()
+    if not stripped:
+        return True
+    candidates = (
+        *_BANNER_MARKERS,
+        *_BANNER_DROP_PREFIXES,
+        "exiting...",
+        "cleaning up",
+        "exit code:",
+        *_PROMPT_ECHO_PREFIXES,
+        "<|im_start|>",
+        "<|im_end|>",
+        "[Start thinking]",
+        "[/End]",
+        prompt,
+    )
+    lowered = stripped.lower()
+    return any(
+        candidate
+        and (
+            candidate.startswith(stripped)
+            or stripped.startswith(candidate)
+            or candidate.lower().startswith(lowered)
+            or lowered.startswith(candidate.lower())
+        )
+        for candidate in candidates
+    )
+
+
+def _clean_llama_cpp_stream(stdout: Any, prompt: str) -> Iterator[str]:
+    """Clean llama.cpp stdout without withholding generated partial content."""
+    in_banner = True
+    buffer = ""
+    passthrough = False
+    for chunk in _iter_stdout_chunks(stdout):
+        if passthrough:
+            # Keep only a possible control-token prefix buffered. Generated
+            # text continues immediately, including before its newline.
+            if chunk in "<[":
+                buffer = chunk
+                passthrough = False
+                continue
+            yield chunk
+            if chunk == "\n":
+                passthrough = False
+            continue
+
+        buffer += chunk
+        if chunk != "\n":
+            if not _needs_complete_stream_line(buffer, prompt):
+                if in_banner:
+                    in_banner = False
+                cleaned = _strip_spinner(
+                    _clean_chat_tokens(_strip_prompt_echo_from_line(buffer, prompt))
+                )
+                if cleaned:
+                    yield cleaned
+                    buffer = ""
+                    passthrough = True
+            continue
+
+        line = buffer
+        buffer = ""
+        if in_banner:
+            if _is_banner_line(line) or _is_banner_drop_line(line) or not line.strip():
+                continue
+            in_banner = False
+        if _is_exit_marker(line):
+            continue
+        cleaned = _strip_spinner(
+            _clean_chat_tokens(_strip_prompt_echo_from_line(line, prompt))
+        )
+        if cleaned:
+            yield cleaned
+
+    if buffer and not in_banner and not _is_exit_marker(buffer):
+        cleaned = _strip_spinner(_clean_chat_tokens(_strip_prompt_echo_from_line(buffer, prompt)))
+        if cleaned:
+            yield cleaned
+
+
 def run_inference_stream(
     model_path: str,
     prompt: str,
@@ -526,118 +629,26 @@ def run_inference_stream(
     stop: Optional[List[str]] = None,
     debug: bool = False,
 ) -> Iterator[str]:
-    """Run text generation with streaming output.
+    """Run generation while exposing partial stdout before a newline.
 
-    Yields chunks of generated text as they arrive from ``llama-cli``.
-    Accepts the same arguments as :func:`run_inference`.
-
-    Filtering:
-    - By default the llama.cpp banner, prompt echo, ``Exiting...`` and
-      chat-template tokens (``<|im_start|>`` etc.) are filtered out.
-    - Pass ``debug=True`` to receive the raw stdout, including banner
-      and end-of-session messages.
-
-    The stream terminates when ``llama-cli`` exits or prints an exit
-    marker (the REPL continues its own loop regardless).
+    Normal mode filters llama.cpp UI/prompt/control tokens. Debug mode is a raw
+    stream and yields every stdout character unchanged.
     """
     binary = require_binary("llama-cli")
-
     args = _build_cli_args(
-        binary, model_path, prompt,
-        temperature=temperature, top_p=top_p, top_k=top_k,
-        max_tokens=max_tokens,
-        n_gpu_layers=n_gpu_layers, n_threads=n_threads, ctx_size=ctx_size,
-        stop=stop,
+        binary, model_path, prompt, temperature=temperature, top_p=top_p,
+        top_k=top_k, max_tokens=max_tokens, n_gpu_layers=n_gpu_layers,
+        n_threads=n_threads, ctx_size=ctx_size, stop=stop,
     )
-
-    with subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    ) as proc:
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
         assert proc.stdout is not None
         assert proc.stderr is not None
-
-        # State for the line-level filter.
-        in_banner = True       # start in the banner block
-        prompt_found = False   # become True once we see the prompt echo
-        response_started = False  # become True once we yield a chunk
-
-        for line in iter(proc.stdout.readline, ""):
-            # ---- phase 1: banner filtering ----------------------------
-            if in_banner:
-                if _is_banner_line(line):
-                    continue
-                # The banner ends on the first non-banner line.  Look
-                # for a structural marker (prompt echo, generate /
-                # sampling line) and fall through to the next phase.
-                if (
-                    line.startswith(">")
-                    or line.startswith("[")
-                    or "sampling:" in line
-                    or "generate:" in line
-                    or "main:" in line
-                ):
-                    in_banner = False
-                    # Fall through.
-                else:
-                    # An unknown line between banner and prompt echo
-                    # (e.g. a single blank or a log line we don't
-                    # recognise).  Drop it and keep waiting.
-                    continue
-
-            # ---- phase 2: locate the prompt echo ----------------------
-            if not prompt_found:
-                echo_idx = _find_prompt_echo(line, prompt)
-                if echo_idx < 0:
-                    # Still pre-response noise (e.g. spinner, log) —
-                    # keep waiting.
-                    continue
-                prompt_found = True
-                # Strip the echo portion from this line; the rest (if
-                # any) is the start of the response.
-                nl = line.find("\n")
-                if nl >= 0:
-                    line = line[nl + 1 :]
-                else:
-                    line = ""
-                if not line:
-                    continue
-
-            # ---- phase 3: end-of-session markers ---------------------
-            if _is_exit_marker(line):
-                break
-
-            # ---- phase 4: chat-token scrub ---------------------------
-            line = _clean_chat_tokens(line)
-            if not line:
-                continue
-
-            if debug:
-                yield line
-            else:
-                cleaned = _strip_spinner(line)
-                if cleaned:
-                    response_started = True
-                    yield cleaned
-
-        # Drain any remaining buffered stdout so the pipe doesn't block
-        # the child on a full buffer.  In ``debug`` mode we also yield
-        # anything left over (post-EOF banner artefacts etc.).
-        try:
-            leftover = proc.stdout.read()
-        except Exception:
-            leftover = ""
-        if debug and leftover:
-            for chunk in _strip_spinner(leftover).splitlines(keepends=True):
-                if chunk:
-                    yield chunk
-
+        chunks = _iter_stdout_chunks(proc.stdout) if debug else _clean_llama_cpp_stream(proc.stdout, prompt)
+        yield from chunks
         proc.wait()
         if proc.returncode != 0:
             stderr = proc.stderr.read()
-            raise RuntimeError(
-                f"llama-cli stream failed (exit {proc.returncode}): "
-                f"{stderr.strip()}"
-            )
+            raise RuntimeError(f"llama-cli stream failed (exit {proc.returncode}): {stderr.strip()}")
 
 
 # ---------------------------------------------------------------------------
@@ -1026,15 +1037,21 @@ def format_chat_messages(
     A missing or unreadable ``chat_template_path`` file is not an
     error; the function simply falls through to the next option.
     """
-    # 1. Explicit chat template file override
+    # 1. Explicit file override or inline template.  A readable path retains
+    # legacy file behavior; any other non-empty value is treated literally as
+    # an inline profile/template string rather than a filesystem path.
     if chat_template_path is not None:
+        template_path = Path(chat_template_path)
         try:
-            with open(chat_template_path, "r", encoding="utf-8") as _f:
-                _explicit_template = _f.read()
+            if template_path.is_file():
+                _explicit_template = template_path.read_text(encoding="utf-8")
+            elif "{{" in chat_template_path or "<|" in chat_template_path or "\n" in chat_template_path:
+                _explicit_template = chat_template_path
+            else:
+                _explicit_template = ""
             if _explicit_template.strip():
                 return _render_chat_template(_explicit_template, messages)
         except (OSError, UnicodeDecodeError):
-            # File missing / unreadable -> fall through to GGUF / fallback
             pass
 
     # 2. Template baked into the GGUF model file
@@ -1123,6 +1140,7 @@ class REPLSession:
         n_threads: int = -1,
         ctx_size: int = 0,
         max_history: int = DEFAULT_MAX_HISTORY,
+        stop: Optional[List[str]] = None,
         debug: bool = False,
     ) -> None:
         self.model_path = model_path
@@ -1134,6 +1152,7 @@ class REPLSession:
         self.n_threads = n_threads
         self.ctx_size = ctx_size
         self.max_history = max(0, int(max_history))
+        self.stop = list(stop or [])
         self.debug = debug
         self.history: List[Dict[str, str]] = []
         if initial_system:
@@ -1193,6 +1212,7 @@ class REPLSession:
                 n_gpu_layers=self.n_gpu_layers,
                 n_threads=self.n_threads,
                 ctx_size=self.ctx_size,
+                stop=self.stop,
                 debug=self.debug,
             )
         else:

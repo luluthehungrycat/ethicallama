@@ -132,6 +132,13 @@ def _inject_profile_into_config(
     if not isinstance(entry, dict):
         entry = {}
         model_defaults[stem] = entry
+    # Profile values are materialised into the resolved model configuration so
+    # ``profile run`` uses the same native/custom-engine path as ``run``.
+    for key, value in (profile.parameters or {}).items():
+        if value is not None:
+            entry[key] = value
+    if profile.stop:
+        entry["stop"] = list(profile.stop)
     if profile.template:
         entry["chat_template"] = profile.template
     if profile.system_prompt:
@@ -455,21 +462,24 @@ def _profile_run_impl(
         "max_history": 10,
         "system_prompt": prof.system_prompt or None,
         "binary_dir": None,
+        "stop": tuple(prof.stop),
         "debug": False,
+        "profile": None,
     }
 
-    needs_inject = bool(prof.template or prof.system_prompt)
-    if needs_inject:
-        cli_orig, config_orig = _inject_profile_into_config(prof, model_path)
-        try:
-            run_cmd.callback(**ctx_args)  # type: ignore[attr-defined]
-        finally:
-            from . import cli as cli_mod
-            from . import config as config_mod
-            cli_mod.load_config = cli_orig  # type: ignore[assignment]
-            config_mod.load_config = config_orig  # type: ignore[assignment]
-    else:
+    # Include effective parameter overrides in the injected model entry. This
+    # preserves ``profile run --max-tokens ...`` precedence without relying on
+    # Click parameter source state during a programmatic callback invocation.
+    runtime_profile = copy.copy(prof)
+    runtime_profile.parameters = effective
+    cli_orig, config_orig = _inject_profile_into_config(runtime_profile, model_path)
+    try:
         run_cmd.callback(**ctx_args)  # type: ignore[attr-defined]
+    finally:
+        from . import cli as cli_mod
+        from . import config as config_mod
+        cli_mod.load_config = cli_orig  # type: ignore[assignment]
+        config_mod.load_config = config_orig  # type: ignore[assignment]
 
 
 @profile_group.command(name="run")

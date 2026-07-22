@@ -30,7 +30,7 @@ def test_cli_version():
     runner = CliRunner()
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    assert "0.2.0" in result.output
 
 
 def test_run_help():
@@ -1470,6 +1470,7 @@ def test_serve_passes_ssl_to_run_server(monkeypatch, tmp_path):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: "")
+    monkeypatch.setattr(cli_mod, "load_config", lambda: {})
 
     runner = CliRunner()
     result = runner.invoke(
@@ -1518,6 +1519,7 @@ def test_serve_ssl_only_keyfile_warns_but_does_not_pass_partial_ssl(monkeypatch,
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _m: "")
+    monkeypatch.setattr(cli_mod, "load_config", lambda: {})
 
     runner = CliRunner()
     result = runner.invoke(main, ["serve", "--ssl-keyfile", str(keyfile)])
@@ -2330,45 +2332,29 @@ def test_quick_discover_finds_engines_on_path(monkeypatch, tmp_path):
 
 
 def test_setup_user_mode_calls_systemctl_user(monkeypatch, tmp_path):
-    """`--service-mode user` invokes systemctl --user (and not sudo systemctl)."""
+    """Generated user service uses only systemctl --user and no sudo."""
     import ethllama.cli as cli_mod
-    import ethllama.config as config_mod
-
-    # Provide a service file so the install helper does not bail out.
-    user_svc = cli_mod._SYSTEMD_DIR / "ethllama-user.service"
-    user_svc.parent.mkdir(parents=True, exist_ok=True)
-    if not user_svc.exists():
-        user_svc.write_text("[Unit]\n[Service]\n[Install]\n")
-
-    # Record subprocess calls.
     calls: list = []
 
     class _Result:
         returncode = 0
-        stdout = ""
-        stderr = b""
+        stdout = "Linger=no"
+        stderr = ""
 
     def fake_run(cmd, *args, **kwargs):
         calls.append(list(cmd))
         return _Result()
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
-
-    # The home dir is /tmp/.../home -- fake Path.home()
-    fake_home = tmp_path
-    monkeypatch.setattr(cli_mod.Path, "home", classmethod(lambda cls: fake_home))
-    monkeypatch.setattr(cli_mod.os, "environ", {"USER": "tester", "LOGNAME": "tester"})
-
-    # Drive _install_user_service directly so we can assert the
-    # systemctl --user invocation.
-    ok = cli_mod._install_user_service(10434, "")
-    assert ok is True, calls
-    # All captured systemctl commands used --user.
-    systemctl_calls = [c for c in calls if "systemctl" in c]
-    assert systemctl_calls, calls
-    assert all("--user" in c for c in systemctl_calls), calls
-    # None of the user-mode install commands invoked sudo.
-    assert all("sudo" not in c for c in calls), calls
+    monkeypatch.setattr(cli_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(cli_mod.os, "environ", {"USER": "tester"})
+    ok = cli_mod._install_user_service("/opt/bin/ethllama", tmp_path / "config.yaml")
+    assert ok is True
+    assert all("sudo" not in command for command in calls)
+    assert ["systemctl", "--user", "daemon-reload"] in calls
+    unit = (tmp_path / ".config/systemd/user/ethllama.service").read_text()
+    assert "User=" not in unit
+    assert "/opt/bin/ethllama" in unit
 
 
 def test_setup_service_mode_skip_skips_install(monkeypatch, tmp_path):
@@ -2403,33 +2389,16 @@ def test_setup_service_mode_skip_skips_install(monkeypatch, tmp_path):
     assert bad == [], f"Unexpected subprocess calls: {bad}"
 
 
-def test_setup_bails_when_ethllama_not_on_path(monkeypatch, tmp_path):
-    """`ethllama setup` exits early with a helpful error when the binary
-    is missing from PATH (the wizard cannot install a service for a CLI
-    the user doesn't even have)."""
+def test_setup_no_install_does_not_require_executable(monkeypatch, tmp_path):
+    """Configuration-only setup does not require an executable or sudo."""
     import ethllama.cli as cli_mod
     import ethllama.config as config_mod
-
     monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.yaml")
     monkeypatch.setattr(cli_mod, "save_config", config_mod.save_config)
-
-    # Make shutil.which("ethllama") return None so the wizard bails.
-    def fake_which(name, *args, **kwargs):
-        if name == "ethllama":
-            return None
-        return None
-
-    monkeypatch.setattr(cli_mod.shutil, "which", fake_which)
-
-    runner = CliRunner()
-    result = runner.invoke(main, ["setup", "--no-install", "--yes"])
-    # The wizard exits non-zero and the user sees a useful message.
-    assert result.exit_code != 0
-    out = (result.output or "").lower()
-    assert "ethllama" in out
-    assert "path" in out
-    # And it does NOT touch the config file.
-    assert not (tmp_path / "config.yaml").exists()
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda *_a, **_kw: None)
+    result = CliRunner().invoke(main, ["setup", "--no-install", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "config.yaml").exists()
 
 
 # ---------------------------------------------------------------------------

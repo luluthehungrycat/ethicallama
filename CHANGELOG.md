@@ -18,12 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install` and `uv tool install` from sdist on platforms where
   no pre-built wheel is available (e.g. Raspberry Pi / ARM Linux).
 
+## [0.2.0] - 2026-07-22
+
+### Added
+- Generated systemd setup: the default user unit runs as the current user with
+  a resolved executable and private user configuration; explicit system mode
+  generates a unit for the invoking user/group and supplies root-owned config
+  through `LoadCredential`.
+- Profile propagation for inline templates, stop sequences, and token limits.
+- Quote-aware custom-engine argument rendering with documented output policies.
+
 ### Fixed
-- Systemd service `ProtectHome` was blocking `/home/<user>/.local/`
-  access for `ethllama` service user. Switched default to
-  `ProtectHome=read-only` so per-user `uv tool install` works without
-  removing isolation entirely. `User=moritz` is the new default; INSTALL.md
-  has a Pattern A (per-user) vs Pattern B (system user) picker.
+- Streaming output now works without prompt echoing, preserves assistant text
+  inside chat delimiters, exposes partial stdout before a newline, and keeps
+  `--debug` fully raw.
+- Server configuration now consistently uses CLI > config > defaults; API keys
+  are read once, compared in constant time, and never persisted by startup.
+- Configuration overrides through absolute `ETHLLAMA_CONFIG` fail closed when
+  missing, unreadable, or malformed.
 
 ## [0.1.7] - 2026-07-11
 
@@ -174,6 +186,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is **off by default**; the only outbound traffic is model
   pulls, and they are user-initiated.
 
-[Unreleased]: https://github.com/luluthehungrycat/ethicallama/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/luluthehungrycat/ethicallama/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.2.0
+[0.1.9]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.1.9
 [0.1.2]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.1.2
 [0.1.0]: https://github.com/luluthehungrycat/ethicallama/releases/tag/v0.1.0

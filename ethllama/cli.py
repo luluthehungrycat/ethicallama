@@ -4,21 +4,20 @@ import sys
 import os
 import time
 import json
-import secrets
 import shutil
 import struct
 import subprocess
+import shlex
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import click
 
-from .config import load_config, save_config, init_config
+from .config import get_config_path, load_config, save_config, init_config
 from .index import load_index, add_to_index, resolve_model_path, remove_from_index, find_in_index
 from .profiles import Profile, load_profile
 from .engines import (
     load_engines,
-    EngineConfig,
     discover_engines,
     generate_engine_config,
     KNOWN_ENGINES,
@@ -28,7 +27,7 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
-@click.version_option(version="0.1.0", prog_name="ethllama")
+@click.version_option(version="0.2.0", prog_name="ethllama")
 def main():
     """ethicallama - ethical, local-only LLM inference wrapper."""
     pass
@@ -52,6 +51,23 @@ def _load_model_defaults(
     if not isinstance(entry, dict):
         return {}
     return entry
+
+
+def _option_was_explicit(name: str) -> bool:
+    """Return whether Click received an option on the command line."""
+    context = click.get_current_context(silent=True)
+    return bool(context and context.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE)
+
+
+def _resolve_setting(key: str, cli_value: Any, application_value: Any, model_config: Dict[str, Any], profile: Optional[Profile]) -> Any:
+    """Apply CLI > profile > per-model > application-default precedence."""
+    if _option_was_explicit(key):
+        return cli_value
+    if profile is not None and isinstance(profile.parameters, dict) and profile.parameters.get(key) is not None:
+        return profile.parameters[key]
+    if model_config.get(key) is not None:
+        return model_config[key]
+    return application_value
 
 
 def _apply_chat_template_and_system(
@@ -430,6 +446,7 @@ def _run_repl_loop(
     ctx_size: int,
     max_history: int,
     prompt_prefix: str,
+    stop: Optional[List[str]] = None,
     debug: bool = False,
 ) -> None:
     """Drive the interactive REPL session.
@@ -459,6 +476,7 @@ def _run_repl_loop(
         n_threads=threads,
         ctx_size=ctx_size,
         max_history=max_history,
+        stop=stop,
         debug=debug,
     )
 
@@ -584,6 +602,7 @@ def _run_repl_loop(
               help="Initial system prompt for REPL mode")
 @click.option("--binary-dir", default=None, type=str,
               help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
+@click.option("--stop", multiple=True, help="Stop sequence (repeatable)")
 @click.option("--debug", is_flag=True, default=False,
               help="Show raw llama.cpp output (banner, prompt echo, "
                    "'Exiting...', chat template tokens) instead of the "
@@ -611,6 +630,7 @@ def run(
     max_history: int,
     system_prompt: Optional[str],
     binary_dir: Optional[str],
+    stop: tuple[str, ...],
     debug: bool,
     profile: Optional[str],
 ):
@@ -670,74 +690,29 @@ def run(
 
     click.echo(f"GPU backend: {gpu_backend}")
 
-    # 2b. Per-model defaults (CLI flag values take precedence).
-    #     Keys in model_defaults are the model filename stems.
+    # 2b. Resolve settings with Click parameter-source tracking. Explicit CLI
+    # values (even default-valued ones) win over profile and model settings.
     model_stem = Path(model_path).stem
     model_cfg = _load_model_defaults(config, model_stem)
-    # If a profile was supplied, merge its parameters into the per-model
-    # config.  Profile values fill in gaps; the per-model config wins
-    # when both are set.  System prompt and chat template follow the
-    # same rule.
-    if _profile is not None:
-        merged: Dict[str, Any] = dict(model_cfg) if model_cfg else {}
-        for key, value in (_profile.parameters or {}).items():
-            if value is not None and key not in merged:
-                merged[key] = value
-        if _profile.system_prompt and "system_prompt" not in merged:
-            merged["system_prompt"] = _profile.system_prompt
-        if _profile.template and "chat_template" not in merged:
-            merged["chat_template"] = _profile.template
-        model_cfg = merged
     if model_cfg:
         click.echo(f"Using per-model config for '{model_stem}'", err=True)
-
-    # CLI flag values are honored if explicitly passed.  Click's
-    # default values (the function's own defaults) act as a sentinel:
-    # if the per-model config also leaves the setting at its default
-    # we use the function default; if the user passes --temperature
-    # 0.3, that value wins; if the per-model config sets temperature
-    # 0.3, it wins when the CLI flag is left at default.  Because
-    # Click always fills in the default for unset flags, we detect
-    # "user did not pass it" by comparing against the click default.
-    cli_defaults = {
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "top_k": 40,
-        "threads": 4,
-        "n_gpu_layers": 0,
-        "gpu_backend": "auto",
-        "max_tokens": 2048,
-    }
-    cli_values = {
-        "temperature": temperature,
-        "top_p": top_p,
-        "top_k": top_k,
-        "threads": threads,
-        "n_gpu_layers": n_gpu_layers,
-        "gpu_backend": gpu_backend,
-        "max_tokens": max_tokens,
-    }
-
-    def _resolve(key: str) -> Any:
-        """Pick per-model default when CLI flag was left at its default."""
-        if key in model_cfg and cli_values[key] == cli_defaults[key]:
-            return model_cfg[key]
-        return cli_values[key]
-
-    effective_temperature = _resolve("temperature")
-    effective_top_p = _resolve("top_p")
-    effective_top_k = _resolve("top_k")
-    effective_n_gpu_layers = _resolve("n_gpu_layers")
-    effective_threads = _resolve("threads")
-    effective_max_tokens = _resolve("max_tokens")
-    # gpu_backend was already resolved to a real backend above, so
-    # fall back to that when the per-model config does not override.
-    effective_gpu_backend = model_cfg.get("gpu_backend", gpu_backend)
-    # ctx_size has no CLI flag yet, so per-model config is the only knob.
-    effective_ctx_size = int(model_cfg.get("ctx_size", 0) or 0)
-    # System prompt and explicit chat template are per-model-only.
-    effective_system_prompt = model_cfg.get("system_prompt", None)
-    effective_chat_template = model_cfg.get("chat_template", None)
+    app_defaults = {"temperature": 0.7, "top_p": 0.9, "top_k": 40, "threads": 4, "n_gpu_layers": 0, "max_tokens": 2048, "gpu_backend": config.get("gpu", {}).get("backend", "cpu")}
+    effective_temperature = _resolve_setting("temperature", temperature, app_defaults["temperature"], model_cfg, _profile)
+    effective_top_p = _resolve_setting("top_p", top_p, app_defaults["top_p"], model_cfg, _profile)
+    effective_top_k = _resolve_setting("top_k", top_k, app_defaults["top_k"], model_cfg, _profile)
+    effective_n_gpu_layers = _resolve_setting("n_gpu_layers", n_gpu_layers, app_defaults["n_gpu_layers"], model_cfg, _profile)
+    effective_threads = _resolve_setting("threads", threads, app_defaults["threads"], model_cfg, _profile)
+    effective_max_tokens = _resolve_setting("max_tokens", max_tokens, app_defaults["max_tokens"], model_cfg, _profile)
+    effective_gpu_backend = _resolve_setting("gpu_backend", gpu_backend, app_defaults["gpu_backend"], model_cfg, _profile)
+    effective_ctx_size = int(_resolve_setting("ctx_size", 0, 0, model_cfg, _profile) or 0)
+    effective_system_prompt = system_prompt if _option_was_explicit("system_prompt") else ((_profile.system_prompt if _profile and _profile.system_prompt else None) or model_cfg.get("system_prompt"))
+    effective_chat_template = (_profile.template if _profile and _profile.template else model_cfg.get("chat_template"))
+    if _option_was_explicit("stop"):
+        effective_stop = list(stop)
+    elif _profile is not None and _profile.stop:
+        effective_stop = list(_profile.stop)
+    else:
+        effective_stop = list(model_cfg.get("stop", []) or [])
 
     # 3. Determine mode: REPL vs one-shot
     #    -i always wins (explicit user intent)
@@ -767,6 +742,7 @@ def run(
             ctx_size=effective_ctx_size,
             max_history=max_history,
             prompt_prefix=prompt_prefix,
+            stop=effective_stop,
             debug=debug,
         )
         return
@@ -805,6 +781,8 @@ def run(
             n_gpu_layers=effective_n_gpu_layers,
             gpu_backend=effective_gpu_backend,
             output=output,
+            max_tokens=effective_max_tokens,
+            stop=effective_stop,
         )
 
         click.echo(f"Running: {' '.join(cmd)}")
@@ -813,8 +791,16 @@ def run(
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 assert proc.stdout is not None
                 assert proc.stderr is not None
-                for line in iter(proc.stdout.readline, ""):
-                    click.echo(line, nl=False)
+                from .inference import _clean_llama_cpp_stream, _iter_stdout_chunks
+
+                if engine_config.output_policy == "llama.cpp" and not debug:
+                    chunks = _clean_llama_cpp_stream(proc.stdout, prompt)
+                else:
+                    chunks = _iter_stdout_chunks(proc.stdout)
+                    if debug and engine_config.output_policy == "raw":
+                        click.echo("[debug] custom engine output_policy=raw; stdout is unfiltered", err=True)
+                for chunk in chunks:
+                    click.echo(chunk, nl=False)
                 proc.wait()
                 if proc.returncode != 0:
                     stderr = proc.stderr.read()
@@ -822,11 +808,17 @@ def run(
                     sys.exit(1)
             else:
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                if result.stdout:
-                    click.echo(result.stdout)
+                engine_stdout = result.stdout
+                if engine_config.output_policy == "llama.cpp":
+                    from .inference import _strip_cli_output
+                    engine_stdout = _strip_cli_output(result.stdout, prompt, debug=debug)
+                elif debug:
+                    click.echo("[debug] custom engine output_policy=raw; stdout is unfiltered", err=True)
+                if engine_stdout:
+                    click.echo(engine_stdout)
                 if output:
                     with open(output, "w") as f:
-                        f.write(result.stdout)
+                        f.write(engine_stdout)
                     click.echo(f"Output saved to {output}")
         except subprocess.CalledProcessError as e:
             click.echo(f"Engine failed (exit {e.returncode}): {e.stderr}", err=True)
@@ -869,6 +861,7 @@ def run(
             n_gpu_layers=effective_n_gpu_layers,
             n_threads=effective_threads,
             ctx_size=effective_ctx_size,
+            stop=effective_stop,
             debug=debug,
         ):
             click.echo(chunk, nl=False)
@@ -898,6 +891,7 @@ def run(
             n_gpu_layers=effective_n_gpu_layers,
             n_threads=effective_threads,
             ctx_size=effective_ctx_size,
+            stop=effective_stop,
             debug=debug,
         )
         click.echo(result)
@@ -1012,539 +1006,285 @@ def config(do_init: bool):
 # `ethllama setup` — guided setup / onboarding
 # ---------------------------------------------------------------------------
 
-# Where the bundled systemd unit files live.  These are template files
-# shipped with the repository; ``setup`` copies them into the right
-# location on the user's system.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_SYSTEMD_DIR = _REPO_ROOT / "contrib" / "systemd"
-
-
 def _can_sudo() -> bool:
-    """Return ``True`` when the current user can use ``sudo`` non-interactively.
-
-    A non-interactive ``sudo -n true`` call is used so this helper never
-    blocks waiting for a password.  If ``sudo`` is not installed or returns
-    non-zero the result is ``False``.
-    """
-    import shutil
+    """Check sudo non-interactively; callers use this only for system mode."""
     if shutil.which("sudo") is None:
         return False
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "true"],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
+        return subprocess.run(
+            ["sudo", "-n", "true"], check=False, capture_output=True, timeout=5
+        ).returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
-    return result.returncode == 0
 
 
 def _quick_discover() -> Dict[str, str]:
-    """Quickly scan :data:`~ethllama.engines.KNOWN_ENGINES` for installed binaries.
-
-    Returns a dict of ``name -> absolute_path`` for every known engine that
-    is on ``PATH`` right now.  Used by :func:`setup` to suggest a
-    ``binary_dir`` before the user has to type one.
-    """
-    import shutil
-    found: Dict[str, str] = {}
-    for name in KNOWN_ENGINES.keys():
-        path = shutil.which(name)
-        if path:
-            found[name] = path
-    return found
+    """Return known engine binaries currently available on PATH."""
+    return {name: found for name in KNOWN_ENGINES if (found := shutil.which(name))}
 
 
-def _install_system_service(port: int, api_key: str) -> bool:
-    """Install and start the systemd service in *system* mode.
+def _resolve_ethllama_executable() -> Optional[str]:
+    """Resolve the installed CLI to the absolute executable required by units."""
+    executable = shutil.which("ethllama")
+    return str(Path(executable).resolve()) if executable else None
 
-    Requires the user to have ``sudo`` access (see :func:`_can_sudo`).
-    The bundled ``contrib/systemd/ethllama.service`` unit is copied to
-    ``/etc/systemd/system/ethllama.service`` and then ``systemctl
-    daemon-reload`` + ``systemctl enable --now ethllama`` are run.
 
-    Returns ``True`` on success, ``False`` if the template is missing or
-    any of the subprocess calls fails.
-    """
-    src = _SYSTEMD_DIR / "ethllama.service"
-    if not src.exists():
-        click.echo(f"! Service template not found: {src}", err=True)
-        return False
+def _render_user_unit(executable: str, config_path: Path) -> str:
+    """Generate a user-scoped unit; config remains private in the user home."""
+    return f"""[Unit]
+Description=ethicallama local API
+After=network.target
 
-    dst = Path("/etc/systemd/system/ethllama.service")
-    click.echo(f"  Copying {src} -> {dst} (requires sudo)")
+[Service]
+Type=simple
+Environment=ETHLLAMA_CONFIG={shlex.quote(str(config_path))}
+ExecStart={shlex.quote(executable)} serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _render_system_unit(executable: str, user: str, group: str, home: Path) -> str:
+    """Generate a PID-1 unit that passes config as a systemd credential."""
+    return f"""[Unit]
+Description=ethicallama local API
+After=network.target
+
+[Service]
+Type=simple
+User={user}
+Group={group}
+Environment=HOME={shlex.quote(str(home))}
+Environment=ETHLLAMA_CONFIG=%d/ethllama-config
+LoadCredential=ethllama-config:/etc/ethllama/config.yaml
+ExecStart={shlex.quote(executable)} serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _run_checked(command: list[str], description: str) -> bool:
+    """Run a non-interactive service setup action and report a useful failure."""
     try:
-        subprocess.run(
-            ["sudo", "cp", str(src), str(dst)], check=True, capture_output=True
-        )
-    except subprocess.CalledProcessError as exc:
-        click.echo(
-            f"  ! Failed to copy service file: {exc.stderr.decode(errors='replace')}",
-            err=True,
-        )
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as exc:
+        click.echo(f"  ! {description} failed: {exc}", err=True)
         return False
-
-    click.echo("  Reloading systemd daemon...")
-    try:
-        subprocess.run(
-            ["sudo", "systemctl", "daemon-reload"],
-            check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        click.echo(
-            f"  ! systemctl daemon-reload failed: {exc.stderr.decode(errors='replace')}",
-            err=True,
-        )
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        click.echo(f"  ! {description} failed: {detail}", err=True)
         return False
-
-    click.echo("  Enabling and starting ethllama service...")
-    try:
-        subprocess.run(
-            ["sudo", "systemctl", "enable", "--now", "ethllama"],
-            check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        click.echo(
-            f"  ! systemctl enable failed: {exc.stderr.decode(errors='replace')}",
-            err=True,
-        )
-        return False
-
-    click.echo("  System service installed and started")
     return True
 
 
-def _install_user_service(port: int, api_key: str) -> bool:
-    """Install and start the systemd *user* service (no sudo).
-
-    Copies ``contrib/systemd/ethllama-user.service`` to
-    ``~/.config/systemd/user/ethllama.service`` and runs
-    ``systemctl --user daemon-reload`` + ``enable --now``.  If linger is
-    not enabled for the current user, prints a reminder so the service
-    will survive logouts.
-    """
-    src = _SYSTEMD_DIR / "ethllama-user.service"
-    if not src.exists():
-        click.echo(f"! Service template not found: {src}", err=True)
-        return False
-
-    user_unit_dir = Path.home() / ".config" / "systemd" / "user"
-    user_unit_dir.mkdir(parents=True, exist_ok=True)
-    dst = user_unit_dir / "ethllama.service"
-
-    click.echo(f"  Copying {src} -> {dst}")
+def _install_user_service(executable: str, config_path: Path) -> bool:
+    """Install a generated user unit without probing or invoking sudo."""
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
     try:
-        shutil.copy(src, dst)
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit_path = unit_dir / "ethllama.service"
+        unit_path.write_text(_render_user_unit(executable, config_path), encoding="utf-8")
     except OSError as exc:
-        click.echo(f"  ! Failed to copy service file: {exc}", err=True)
+        click.echo(f"  ! Failed to write user service: {exc}", err=True)
         return False
-
-    click.echo("  Reloading user systemd daemon...")
-    try:
-        subprocess.run(
-            ["systemctl", "--user", "daemon-reload"],
-            check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        click.echo(
-            f"  ! systemctl --user daemon-reload failed: "
-            f"{exc.stderr.decode(errors='replace')}",
-            err=True,
-        )
+    if not _run_checked(["systemctl", "--user", "daemon-reload"], "systemctl --user daemon-reload"):
         return False
-
-    click.echo("  Enabling and starting ethllama service...")
-    try:
-        subprocess.run(
-            ["systemctl", "--user", "enable", "--now", "ethllama"],
-            check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        click.echo(
-            f"  ! systemctl --user enable failed: "
-            f"{exc.stderr.decode(errors='replace')}",
-            err=True,
-        )
+    if not _run_checked(["systemctl", "--user", "enable", "--now", "ethllama"], "systemctl --user enable"):
         return False
-
-    # Remind the user to enable linger so the service starts on boot.
-    linger_ok = False
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
     if user:
         try:
-            res = subprocess.run(
-                ["loginctl", "show-user", user],
-                check=False, capture_output=True, text=True, timeout=5,
-            )
-            linger_ok = "Linger=yes" in (res.stdout or "")
+            result = subprocess.run(["loginctl", "show-user", user], check=False, capture_output=True, text=True, timeout=5)
+            click.echo("  linger: " + ("enabled" if "Linger=yes" in result.stdout else "not enabled (not changed)"))
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            linger_ok = False
-    if not linger_ok:
-        click.echo(
-            "  ! Note: loginctl linger is not enabled for your user."
-        )
-        click.echo(
-            "    Run 'loginctl enable-linger $USER' to start the service on boot."
-        )
+            click.echo("  linger: unable to determine (not changed)")
+    return True
 
-    click.echo("  User service installed and started")
+
+def _install_system_service(executable: str, config: Dict[str, Any]) -> bool:
+    """Install a generated system unit using only preflighted ``sudo -n``."""
+    if os.geteuid() == 0:
+        click.echo("  ! Refusing system-mode setup as root; run it as the service user.", err=True)
+        return False
+    if not _can_sudo():
+        click.echo("  ! system mode requires passwordless sudo (sudo -n).", err=True)
+        return False
+    import grp
+    import pwd
+    import tempfile
+
+    account = pwd.getpwuid(os.getuid())
+    group = grp.getgrgid(os.getgid()).gr_name
+    config["telemetry"] = {**config.get("telemetry", {}), "enabled": False}
+    unit = _render_system_unit(executable, account.pw_name, group, Path(account.pw_dir))
+    try:
+        with tempfile.TemporaryDirectory(prefix="ethllama-setup-") as tmp:
+            tmp_path = Path(tmp)
+            config_source = tmp_path / "config.yaml"
+            unit_source = tmp_path / "ethllama.service"
+            import yaml
+            config_source.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            unit_source.write_text(unit, encoding="utf-8")
+            actions = [
+                (["sudo", "-n", "install", "-d", "-o", "root", "-g", "root", "-m", "700", "/etc/ethllama"], "create /etc/ethllama"),
+                (["sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "600", str(config_source), "/etc/ethllama/config.yaml"], "install system config"),
+                (["sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "644", str(unit_source), "/etc/systemd/system/ethllama.service"], "install system unit"),
+                (["sudo", "-n", "systemctl", "daemon-reload"], "systemctl daemon-reload"),
+                (["sudo", "-n", "systemctl", "enable", "--now", "ethllama"], "systemctl enable"),
+            ]
+            for command, description in actions:
+                if not _run_checked(command, description):
+                    return False
+    except OSError as exc:
+        click.echo(f"  ! Failed to prepare system service: {exc}", err=True)
+        return False
     return True
 
 
 @main.command()
-@click.option(
-    "--service-mode",
-    type=click.Choice(["system", "user", "skip"]),
-    default=None,
-    help="Service installation mode (auto-detects if not specified)",
-)
-@click.option(
-    "--binary-dir",
-    default=None,
-    type=str,
-    help="Directory with llama.cpp binaries (uses discover if not specified)",
-)
-@click.option(
-    "--port",
-    default=10434,
-    type=int,
-    help="Port for the API server",
-)
-@click.option(
-    "--api-key",
-    default=None,
-    type=str,
-    help="API key (auto-generated if not specified)",
-)
-@click.option(
-    "--no-install",
-    is_flag=True,
-    default=False,
-    help="Skip systemd installation, just configure",
-)
-@click.option(
-    "--yes", "-y",
-    is_flag=True,
-    default=False,
-    help="Skip interactive prompts and use defaults",
-)
-def setup(
-    service_mode: Optional[str],
-    binary_dir: Optional[str],
-    port: int,
-    api_key: Optional[str],
-    no_install: bool,
-    yes: bool,
-):
-    """Interactive setup for ethicallama.
-
-    Walks you through:
-
-    \b
-      1. Discovering or specifying a llama.cpp binary directory
-      2. Choosing the service type (system with sudo, or user without sudo)
-      3. Setting an API key (optional)
-      4. Installing the systemd service file
-      5. Enabling and starting the service
-
-    Re-running this command updates the configuration.  Use ``--no-install``
-    to only update the config without touching systemd.
-    """
-    click.echo("=" * 60)
-    click.echo("ethicallama setup wizard")
-    click.echo("=" * 60)
-    click.echo()
-
-    # Step 1: detect the current environment.
-    has_sudo = _can_sudo() or os.geteuid() == 0
-    has_ethllama = shutil.which("ethllama") is not None
-
-    click.echo(f"  sudo available:  {has_sudo}")
-    click.echo(f"  ethllama on PATH: {has_ethllama}")
-    if not has_ethllama:
-        click.echo(
-            "  ! ethllama not found on PATH. "
-            "Run 'uv tool install ethicallama' (or 'pip install --user ethicallama') first.",
-            err=True,
-        )
-        sys.exit(1)
-    click.echo()
-
-    # Step 2: figure out the binary directory.
-    if binary_dir is None:
-        discovered = _quick_discover()
-        if discovered:
-            first_dir = str(Path(next(iter(discovered.values()))).parent)
-            names = ", ".join(sorted(discovered.keys()))
-            click.echo(f"  Discovered inference engines on PATH: {names}")
-            if yes:
-                binary_dir = first_dir
-                click.echo(f"  Using binary dir: {binary_dir}")
-            else:
-                default_dir = first_dir
-                binary_dir = click.prompt(
-                    "  Path to llama.cpp build/bin directory (Enter to accept discovered path)",
-                    default=default_dir,
-                )
-        else:
-            if yes:
-                binary_dir = ""
-            else:
-                binary_dir = click.prompt(
-                    "  Path to llama.cpp build/bin directory (Enter to skip)",
-                    default="",
-                )
-
-    # Step 3: choose service mode.
+@click.option("--service-mode", type=click.Choice(["system", "user", "skip"]), default="user", show_default=True, help="Service installation mode")
+@click.option("--binary-dir", default=None, type=str, help="Directory with llama.cpp binaries")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Loopback host for the API")
+@click.option("--port", default=10434, show_default=True, type=int, help="Port for the API server")
+@click.option("--api-key", default=None, type=str, help="Set or replace API authentication key")
+@click.option("--no-api-key", is_flag=True, default=False, help="Explicitly disable API key authentication")
+@click.option("--no-install", is_flag=True, default=False, help="Skip systemd installation, just configure")
+@click.option("--yes", "yes", is_flag=True, default=False, help="Skip interactive prompts and preserve existing authentication")
+def setup(service_mode: str, binary_dir: Optional[str], host: str, port: int, api_key: Optional[str], no_api_key: bool, no_install: bool, yes: bool):
+    """Configure ethicallama and optionally install a generated systemd unit."""
+    if api_key is not None and no_api_key:
+        raise click.UsageError("--api-key and --no-api-key cannot be used together")
     if no_install:
-        click.echo("  Skipping service installation (--no-install).")
         service_mode = "skip"
-    elif service_mode is None:
-        if not has_sudo:
-            click.echo("  sudo not available - falling back to user-mode service.")
-            service_mode = "user"
-        elif yes:
-            service_mode = "system"
-        else:
-            service_mode = click.prompt(
-                "  Install as [system] or [user] service?",
-                type=click.Choice(["system", "user"]),
-                default="user",
-            )
-
-    # Step 4: API key.
-    if api_key is None and not yes:
-        if click.confirm("  Enable API key authentication?", default=False):
-            entered = click.prompt("  API key (Enter to auto-generate)", default="")
-            api_key = entered or secrets.token_urlsafe(32)
-            click.echo(f"  Generated API key: {api_key}")
-    elif api_key is None:
-        # --yes without explicit --api-key: leave auth off
-        api_key = ""
-
-    # Step 5: save config.
+    if service_mode == "system" and os.geteuid() == 0:
+        raise click.UsageError("system mode must be run by the intended non-root service user")
+    executable = _resolve_ethllama_executable()
+    if service_mode != "skip" and not executable:
+        raise click.ClickException("ethllama is not on PATH; install it before creating a service")
     config = load_config()
     if not isinstance(config, dict):
         config = {}
-    if binary_dir:
-        engines = config.setdefault("engines", {})
-        if isinstance(engines, dict):
-            engines["binary_dir"] = binary_dir
     api = config.setdefault("api", {})
-    if isinstance(api, dict):
-        api["port"] = port
-        if api_key:
-            api["api_key"] = api_key
-    save_config(config)
-    click.echo()
-    click.echo(f"  Configuration saved to {Path.home() / '.ethllama' / 'config.yaml'}")
+    if not isinstance(api, dict):
+        api = {}
+        config["api"] = api
+    api["host"] = host
+    api["port"] = port
+    if no_api_key:
+        api["api_key"] = ""
+    elif api_key is not None:
+        api["api_key"] = api_key
+    engines = config.setdefault("engines", {})
+    if binary_dir and isinstance(engines, dict):
+        engines["binary_dir"] = binary_dir
+    config["telemetry"] = {**config.get("telemetry", {}), "enabled": False}
 
-    # Step 6: install the service.
-    if service_mode == "skip":
-        click.echo("  (systemd installation skipped)")
-    elif service_mode == "system":
-        click.echo()
-        click.echo("Step: Installing systemd service (system mode)")
-        if not _install_system_service(port, api_key or ""):
-            click.echo("  ! System service install failed.", err=True)
-    elif service_mode == "user":
-        click.echo()
-        click.echo("Step: Installing systemd service (user mode)")
-        if not _install_user_service(port, api_key or ""):
-            click.echo("  ! User service install failed.", err=True)
-
-    # Step 7: final summary.
-    click.echo()
-    click.echo("=" * 60)
-    click.echo("Setup complete!")
-    click.echo("=" * 60)
-    if binary_dir:
-        click.echo(f"  Binary dir:  {binary_dir}")
-    click.echo(f"  API port:    {port}")
-    if api_key:
-        # Show only the first 4 chars; the rest is sensitive.
-        click.echo(f"  API key:     {api_key[:4]}...{api_key[-4:]} (saved in config)")
     if service_mode == "system":
-        click.echo("  Status:      sudo systemctl status ethllama")
-        click.echo("  Logs:        sudo journalctl -u ethllama -f")
-    elif service_mode == "user":
-        click.echo("  Status:      systemctl --user status ethllama")
-        click.echo("  Logs:        journalctl --user -u ethllama -f")
-        click.echo()
-        click.echo(
-            "  Tip: run 'loginctl enable-linger $USER' to start the service on boot."
-        )
-    click.echo()
+        if not _install_system_service(executable or "", config):
+            raise click.ClickException("system service installation failed")
+        click.echo("System service installed. Credentials are held in /etc/ethllama/config.yaml.")
+        return
+
+    config_path = get_config_path()
+    existed = config_path.exists()
+    save_config(config)
+    if not existed:
+        try:
+            config_path.parent.chmod(0o700)
+            config_path.chmod(0o600)
+        except OSError as exc:
+            raise click.ClickException(f"could not secure config permissions: {exc}") from exc
+    click.echo(f"Configuration saved to {config_path}")
+    if service_mode == "user":
+        if not _install_user_service(executable or "", config_path):
+            raise click.ClickException("user service installation failed")
+        click.echo("User service installed and started.")
+    else:
+        click.echo("systemd installation skipped")
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1", show_default=True, help="Host to bind to")
-@click.option("--port", "-p", default=10434, show_default=True, type=int, help="Port to listen on (default 10434 — Ollama homage)")
-@click.option("--api-key", default="", help="API key for authentication")
+@click.option("--host", default=None, help="Host to bind to (defaults to api.host or 127.0.0.1)")
+@click.option("--port", "-p", default=None, type=int, help="Port to listen on (defaults to api.port or 10434)")
+@click.option("--api-key", default=None, help="API key for authentication (does not persist)")
+@click.option("--no-api-key", is_flag=True, default=False, help="Explicitly disable API-key authentication for this process")
 @click.option("--n-gpu-layers", default=0, show_default=True, type=int, help="Layers to offload to GPU")
 @click.option("--gpu-backend", default="auto", show_default=True, type=str, help="GPU backend (vulkan, rocm, cuda, auto)")
 @click.option("--threads", default=4, show_default=True, type=int, help="CPU thread count")
-@click.option("--model", "-m", default=None, type=str,
-              help="Model identifier or path to pre-load at server startup")
-@click.option("--idle-timeout", "--ttl", default=0, show_default=True, type=int,
-              help="Auto-unload model after N seconds idle (0=disabled)")
-@click.option("--binary-dir", default=None, type=str,
-              help="Directory containing llama.cpp binaries (llama-cli, llama-embedding)")
+@click.option("--model", "-m", default=None, type=str, help="Model identifier or path to pre-load at server startup")
+@click.option("--idle-timeout", "--ttl", default=0, show_default=True, type=int, help="Auto-unload model after N seconds idle (0=disabled)")
+@click.option("--binary-dir", default=None, type=str, help="Directory containing llama.cpp binaries")
 @click.option("--ssl-keyfile", default=None, type=click.Path(exists=True), help="Path to TLS key file (enables HTTPS)")
 @click.option("--ssl-certfile", default=None, type=click.Path(exists=True), help="Path to TLS certificate file (enables HTTPS)")
 @click.option("--ssl-keyfile-password", default=None, type=str, help="Password for encrypted TLS key file")
 @click.option("--ssl-ca-certs", default=None, type=click.Path(exists=True), help="Path to CA certificate file for client cert verification")
-@click.option("--profile", "-P", default=None,
-              help="Pre-apply settings from a named profile "
-                   "(~/.ethllama/profiles/<name>.yaml).  Profile values "
-                   "fill in the gaps left by explicit flags.  The "
-                   "profile's model is used when --model is not set.")
-def serve(host: str, port: int, api_key: str, n_gpu_layers: int, gpu_backend: str,
+@click.option("--profile", "-P", default=None, help="Apply a named profile; CLI options take precedence")
+def serve(host: Optional[str], port: Optional[int], api_key: Optional[str], no_api_key: bool, n_gpu_layers: int, gpu_backend: str,
           threads: int, model: Optional[str], idle_timeout: int, binary_dir: Optional[str],
-          ssl_keyfile: Optional[str], ssl_certfile: Optional[str],
-          ssl_keyfile_password: Optional[str], ssl_ca_certs: Optional[str],
-          profile: Optional[str]):
-    """Start the HTTP API server (FastAPI, opt-in).
+          ssl_keyfile: Optional[str], ssl_certfile: Optional[str], ssl_keyfile_password: Optional[str],
+          ssl_ca_certs: Optional[str], profile: Optional[str]):
+    """Start the local HTTP API server without persisting startup credentials."""
+    if api_key is not None and no_api_key:
+        raise click.UsageError("--api-key and --no-api-key cannot be used together")
+    from .inference import set_binary_config, set_gpu_config
+    config = load_config()
+    api_config = config.get("api", {}) if isinstance(config.get("api", {}), dict) else {}
+    effective_host = host if _option_was_explicit("host") else api_config.get("host", "127.0.0.1")
+    effective_port = port if _option_was_explicit("port") else api_config.get("port", 10434)
+    if no_api_key:
+        effective_api_key = ""
+    elif _option_was_explicit("api_key"):
+        effective_api_key = api_key or ""
+    else:
+        effective_api_key = api_config.get("api_key", "")
 
-    MODEL is an optional model identifier or path to pre-load at startup.
-
-    Use ``--idle-timeout`` / ``--ttl N`` to auto-unload the pre-loaded model
-    after N seconds of inactivity (0 = never unload).  This is useful for
-    freeing GPU memory when the server sits idle for long periods.  On the
-    next request after an unload the model is re-resolved from the index
-    (or returns 404 if not indexed).
-    """
-    from .inference import set_gpu_config, set_binary_config
-
-    # If --profile was given, load it now so we can (a) use its model
-    # as a fallback for --model, and (b) merge its parameters into the
-    # per-model config below.
-    _serve_profile: Optional[Profile] = None
+    serve_profile: Optional[Profile] = None
     if profile is not None:
         try:
-            _serve_profile = load_profile(profile)
-        except FileNotFoundError:
-            click.echo(
-                f"Error: profile '{profile}' not found. "
-                f"Use 'ethllama profile list' to see available profiles.",
-                err=True,
-            )
-            sys.exit(1)
-        except Exception as exc:  # noqa: BLE001 — surface to user
-            click.echo(
-                f"Error loading profile '{profile}': {exc}", err=True
-            )
-            sys.exit(1)
-        if not model and _serve_profile.model:
-            model = _serve_profile.model
-        click.echo(f"Profile: {profile}  (model: {_serve_profile.model})", err=True)
+            serve_profile = load_profile(profile)
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(f"Error loading profile '{profile}': {exc}") from exc
+        if not model and serve_profile.model:
+            model = serve_profile.model
+        click.echo(f"Profile: {profile}  (model: {serve_profile.model})", err=True)
 
-    # Resolve preloaded model BEFORE we apply per-model config so the
-    # model stem is known.
     preloaded_model: Optional[str] = None
     if model:
         preloaded_model = resolve_model_path(model)
+        if not preloaded_model and os.path.exists(model):
+            preloaded_model = os.path.abspath(model)
         if not preloaded_model:
-            if os.path.exists(model):
-                preloaded_model = os.path.abspath(model)
-            else:
-                click.echo(f"Warning: Model '{model}' not found in index and is not a valid path.", err=True)
-                click.echo("The server will start without a pre-loaded model.", err=True)
-                preloaded_model = None
-
-    # Apply per-model defaults for the pre-loaded model, if any.
-    # CLI flag values are honored if explicitly passed (same logic
-    # as in the `run` command); per-model values fill in the rest.
-    cfg_for_serve = load_config()
-    serve_model_cfg: Dict[str, Any] = {}
-    if preloaded_model:
-        serve_model_stem = Path(preloaded_model).stem
-        serve_model_cfg = _load_model_defaults(cfg_for_serve, serve_model_stem)
-        # If a profile was supplied, merge its parameters into the
-        # per-model config (profile values fill in gaps).
-        if _serve_profile is not None:
-            merged_serve: Dict[str, Any] = dict(serve_model_cfg)
-            for key, value in (_serve_profile.parameters or {}).items():
-                if value is not None and key not in merged_serve:
-                    merged_serve[key] = value
-            serve_model_cfg = merged_serve
-        if serve_model_cfg:
-            click.echo(
-                f"Using per-model config for '{serve_model_stem}'", err=True
-            )
-
-    cli_defaults_serve = {
-        "n_gpu_layers": 0,
-        "gpu_backend": "auto",
-        "threads": 4,
-        "ctx_size": 0,
-    }
-    cli_values_serve = {
-        "n_gpu_layers": n_gpu_layers,
-        "gpu_backend": gpu_backend,
-        "threads": threads,
-        "ctx_size": 0,
-    }
-
-    def _resolve_serve(key: str) -> Any:
-        if (
-            key in serve_model_cfg
-            and cli_values_serve[key] == cli_defaults_serve[key]
-        ):
-            return serve_model_cfg[key]
-        return cli_values_serve[key]
-
-    effective_n_gpu_layers = _resolve_serve("n_gpu_layers")
-    effective_threads = _resolve_serve("threads")
-    effective_ctx_size = int(serve_model_cfg.get("ctx_size", 0) or 0)
-    # gpu_backend has the same "auto -> config default" resolution as
-    # in the `run` command.
-    effective_gpu_backend_serve = gpu_backend
-    if effective_gpu_backend_serve == "auto":
-        effective_gpu_backend_serve = cfg_for_serve.get("gpu", {}).get(
-            "backend", "cpu"
-        )
-    if "gpu_backend" in serve_model_cfg:
-        effective_gpu_backend_serve = serve_model_cfg["gpu_backend"]
-
-    set_gpu_config(
-        n_gpu_layers=effective_n_gpu_layers,
-        gpu_backend=effective_gpu_backend_serve,
-        n_threads=effective_threads,
-        ctx_size=effective_ctx_size,
-    )
+            preloaded_model = None
+            click.echo(f"Warning: Model '{model}' not found; starting without a pre-loaded model.", err=True)
+    model_config = _load_model_defaults(config, Path(preloaded_model).stem) if preloaded_model else {}
+    effective_n_gpu_layers = _resolve_setting("n_gpu_layers", n_gpu_layers, 0, model_config, serve_profile)
+    effective_threads = _resolve_setting("threads", threads, 4, model_config, serve_profile)
+    effective_ctx_size = int(_resolve_setting("ctx_size", 0, 0, model_config, serve_profile) or 0)
+    effective_gpu_backend = _resolve_setting("gpu_backend", gpu_backend, config.get("gpu", {}).get("backend", "cpu"), model_config, serve_profile)
+    set_gpu_config(n_gpu_layers=effective_n_gpu_layers, gpu_backend=effective_gpu_backend, n_threads=effective_threads, ctx_size=effective_ctx_size)
     if binary_dir:
         set_binary_config(binary_dir=binary_dir)
-
     try:
         from .api import run_server
-    except ImportError as e:
-        click.echo(f"Error: {e}", err=True)
-        click.echo("Install API dependencies: pip install ethllama[api]", err=True)
-        sys.exit(1)
-
-    click.echo(f"Starting ethicallama API on http://{host}:{port}")
-    if api_key:
+    except ImportError as exc:
+        raise click.ClickException(f"Install API dependencies: pip install ethllama[api] ({exc})") from exc
+    click.echo(f"Starting ethicallama API on http://{effective_host}:{effective_port}")
+    if effective_api_key:
         click.echo("API key authentication enabled")
-    if preloaded_model:
-        click.echo(f"Pre-loaded model: {preloaded_model}")
-    if idle_timeout and idle_timeout > 0:
-        click.echo(f"Idle timeout: {idle_timeout}s (model will unload after inactivity)")
-    click.echo("Press Ctrl+C to stop")
     try:
-        run_server(
-            host=host,
-            port=port,
-            api_key=api_key,
-            model_path=preloaded_model,
-            idle_timeout=idle_timeout,
-            ssl_keyfile=ssl_keyfile,
-            ssl_certfile=ssl_certfile,
-            ssl_keyfile_password=ssl_keyfile_password,
-            ssl_ca_certs=ssl_ca_certs,
-        )
+        run_server(host=effective_host, port=int(effective_port), api_key=effective_api_key,
+                   model_path=preloaded_model, idle_timeout=idle_timeout,
+                   ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+                   ssl_keyfile_password=ssl_keyfile_password, ssl_ca_certs=ssl_ca_certs)
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")
 
