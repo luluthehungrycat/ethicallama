@@ -1,9 +1,10 @@
 import os
 import yaml
 import subprocess
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional
-from jinja2 import Template
+from jinja2 import StrictUndefined, Template
 
 ENGINES_DIR = Path.home() / ".ethllama" / "engines"
 
@@ -20,6 +21,11 @@ class EngineConfig:
         self.supports_streaming = self.config.get("supports_streaming", False)
         self.model_extensions = self.config.get("model_extensions", [])
         self.default_model = self.config.get("default_model")
+        # Arbitrary engines are raw by default. Set output_policy: llama.cpp for
+        # compatible tools whose stdout follows llama.cpp banner/echo conventions.
+        self.output_policy = self.config.get("output_policy", "raw")
+        if self.output_policy not in {"raw", "llama.cpp"}:
+            raise ValueError("output_policy must be raw or llama.cpp")
 
     def validate(self) -> bool:
         """Check if the engine binary exists and pre_check passes."""
@@ -28,8 +34,7 @@ class EngineConfig:
         if self.pre_check:
             try:
                 subprocess.run(
-                    Template(self.pre_check).render(binary=self.binary),
-                    shell=True,
+                    shlex.split(Template(self.pre_check, undefined=StrictUndefined).render(binary=self.binary)),
                     check=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -49,9 +54,17 @@ class EngineConfig:
         n_gpu_layers: int = 0,
         gpu_backend: str = "cpu",
         output: Optional[str] = None,
+        max_tokens: int = 2048,
+        stop: Optional[List[str]] = None,
     ) -> List[str]:
-        """Render the engine's CLI command from ethllama's args."""
-        template = Template(self.args_template)
+        """Render an argv list without invoking a shell.
+
+        Templates receive ``max_tokens`` and ``stop`` (also available as
+        ``stop_sequences``).  Use shell-style quoting in YAML for values that
+        may contain whitespace; :func:`shlex.split` preserves those arguments
+        while subprocess receives an argv list, never a shell command.
+        """
+        template = Template(self.args_template, undefined=StrictUndefined)
         command = template.render(
             binary=self.binary,
             model_path=model_path,
@@ -63,8 +76,11 @@ class EngineConfig:
             n_gpu_layers=n_gpu_layers,
             gpu_backend=gpu_backend,
             output=output,
+            max_tokens=max_tokens,
+            stop=list(stop or []),
+            stop_sequences=list(stop or []),
         )
-        return command.split()
+        return shlex.split(command)
 
 def load_engines() -> Dict[str, EngineConfig]:
     """Load all engine configs from ~/.ethllama/engines/."""

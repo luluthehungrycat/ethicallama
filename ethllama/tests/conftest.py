@@ -141,6 +141,7 @@ def test_client(tmp_ethllama_home, mock_inference, mock_embeddings) -> TestClien
     ``indexed_model`` — keep the two fixtures independent so ``GET /v1/models``
     can be tested in both empty and populated states.
     """
+    api.configure_api_key("")
     return TestClient(api.app)
 
 
@@ -159,4 +160,5 @@ def auth_test_client(
     cfg["api"] = {**config.DEFAULT_CONFIG["api"], "api_key": api_key}
     config.save_config(cfg)
 
+    api.configure_api_key(api_key)
     return TestClient(api.app), api_key

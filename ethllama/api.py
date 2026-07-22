@@ -4,6 +4,7 @@ import os
 import time
 import json
 import asyncio
+import hmac
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 
 from .config import load_config
 from .index import load_index, resolve_model_path
-from .inference import run_inference, get_embeddings, get_gpu_config, format_chat_messages
+from .inference import run_inference, get_embeddings, format_chat_messages
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class EmbeddingRequest(BaseModel):
 
 app = FastAPI(
     title="ethicallama API",
-    version="0.1.0",
+    version="0.2.0",
     description="OpenAI-compatible local LLM inference API",
 )
 
@@ -79,13 +80,30 @@ app.add_middleware(
 # Auth dependency
 # ---------------------------------------------------------------------------
 
+def configure_api_key(api_key: str | None = None) -> None:
+    """Read the API key once and retain it in application state.
+
+    Passing ``None`` reads the active configuration.  Passing ``""`` is the
+    explicit, caller-controlled way to disable auth for this process; server
+    startup never writes either value back to disk.
+    """
+    if api_key is None:
+        config = load_config()
+        api = config.get("api", {})
+        api_key = api.get("api_key", "") if isinstance(api, dict) else ""
+    app.state.api_key = str(api_key or "")
+
+
 def verify_api_key(request: Request) -> bool:
-    """Dependency to verify API key if configured."""
-    config = load_config()
-    api_key = config.get("api", {}).get("api_key", "")
+    """Dependency to verify a configured bearer key in constant time."""
+    api_key = getattr(app.state, "api_key", None)
+    if api_key is None:
+        configure_api_key()
+        api_key = app.state.api_key
     if api_key:
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != api_key:
+        supplied = auth[7:] if auth.startswith("Bearer ") else ""
+        if not hmac.compare_digest(supplied, api_key):
             raise HTTPException(
                 status_code=401,
                 detail="Invalid API key",
@@ -422,7 +440,7 @@ async def embeddings(
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.post("/v1/chat/completions")
@@ -540,7 +558,7 @@ def create_app() -> FastAPI:
 def run_server(
     host: str = "127.0.0.1",
     port: int = 10434,
-    api_key: str = "",
+    api_key: str | None = None,
     model_path: Optional[str] = None,
     idle_timeout: int = 0,
     ssl_keyfile: Optional[str] = None,
@@ -578,11 +596,7 @@ def run_server(
     """
     import uvicorn
 
-    if api_key:
-        from .config import save_config
-        config = load_config()
-        config.setdefault("api", {})["api_key"] = api_key
-        save_config(config)
+    configure_api_key(api_key)
 
     # Stash the preloaded model path on the FastAPI app state so route
     # handlers can read it from any thread.  Also initialise the idle

@@ -13,7 +13,7 @@ import struct
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional
 
 # Where our built binaries live (relative to this file's location)
 BUILD_BIN_DIR = (Path(__file__).resolve().parent.parent / "llama.cpp-build" / "bin")
@@ -244,22 +244,205 @@ def _build_cli_args(
     return args
 
 
-def _strip_cli_output(raw: str, prompt: str) -> str:
+# Lines in llama.cpp's startup banner that should be filtered out.  These
+# appear on stdout between the binary's launch and the actual response.
+_BANNER_MARKERS = (
+    "llama_model_loader",
+    "llm_load_tensors",
+    "llama_model_load",
+    "llama_print_system_info",
+    "print_info",
+    "system_info",
+    "system_build",
+    "llm_load_print_meta",
+    "load_tensors",
+    "model type",
+    "model size",
+    "model layers",
+    "model params",
+    "general.architecture",
+    "general.name",
+    "print_info:",
+)
+
+
+def _is_banner_line(line: str) -> bool:
+    """Return True if a line looks like a llama.cpp startup banner line."""
+    return any(marker in line for marker in _BANNER_MARKERS)
+
+
+# Lines that should be dropped when they appear in the leading banner
+# block (after the strict banner lines but before the response).  These
+# are session metadata such as sampling / generation parameters that
+# aren't part of the model output.
+_BANNER_DROP_PREFIXES = (
+    "sampling:",
+    "generate:",
+    "main:",
+)
+
+
+def _is_banner_drop_line(line: str) -> bool:
+    """Return True if a line is a banner trailing metadata line."""
+    stripped = line.lstrip()
+    return any(stripped.startswith(p) for p in _BANNER_DROP_PREFIXES)
+
+
+def _is_exit_marker(line: str) -> bool:
+    """Return True if a line is a llama.cpp end-of-session marker."""
+    lower = line.lower()
+    return any(
+        marker in lower
+        for marker in ("exiting...", "cleaning up", "exit code:")
+    )
+
+
+# Patterns llama.cpp uses to echo the prompt back to the user.  Different
+# llama.cpp versions / chat-template configurations emit slightly
+# different prefixes, so we try the common ones in order.
+_PROMPT_ECHO_PREFIXES = ("> ", ">> ", ">>> ", " [user]: ", "[user]: ")
+
+
+def _find_prompt_echo(raw: str, prompt: str) -> int:
+    """Find the start of the prompt echo in ``raw``, or -1 if not found.
+
+    Handles ``> {prompt}``, ``> > {prompt}``, ``[user]: {prompt}`` and
+    the bare ``{prompt}`` form.
+    """
+    if not prompt:
+        return -1
+    # Build a list of patterns in priority order; shorter/looser first so
+    # we don't miss when a longer marker isn't present.
+    patterns = []
+    for prefix in _PROMPT_ECHO_PREFIXES:
+        patterns.append(f"{prefix}{prompt}")
+    patterns.append(prompt)
+    best = -1
+    for pattern in patterns:
+        idx = raw.find(pattern)
+        if idx >= 0 and (best < 0 or idx < best):
+            best = idx
+    return best
+
+
+def _clean_chat_tokens(line: str) -> str:
+    """Remove chat control delimiters while preserving assistant content.
+
+    Models sometimes wrap a response in ``<|im_start|>assistant`` and
+    ``<|im_end|>``.  Removing a whole paired block loses the generated reply,
+    so only delimiter tokens and role labels are removed here.
+    """
+    # Echoed user/system turns are not generated content. Remove those whole
+    # turns first, but keep an assistant turn's payload.
+    line = re.sub(r"<\|im_start\|>\s*(?:user|system)\s*\n.*?<\|im_end\|>", "", line, flags=re.DOTALL)
+    line = re.sub(r"<\|im_start\|>\s*assistant\s*", "", line)
+    line = re.sub(r"<\|im_end\|>", "", line)
+    line = re.sub(r"<\|[a-z_]+\|>", "", line)
+    line = re.sub(r"\[/?[A-Z][a-z]+(?: [a-z]+)*\]", "", line)
+    return line
+
+
+def _strip_llama_cpp_noise(text: str, debug: bool = False) -> str:
+    """Strip llama.cpp's UI noise from stdout.
+
+    Filters out:
+    - ASCII logo / banner at the start (lines containing markers like
+      ``llama_model_loader``, ``llm_load_tensors``, ``llama_print_system_info``)
+    - Spinner characters and progress indicators
+    - ``Exiting...`` / ``cleaning up`` / ``exit code:`` end-of-session
+      messages
+    - Chat template tokens (``<|im_start|>``, ``[Start thinking]``, etc.)
+
+    Args:
+        text: Raw stdout from ``llama-cli``.
+        debug: When True, skip all filtering and return ``text`` unchanged.
+            Useful for diagnosing model loading / banner / echo issues.
+
+    Returns:
+        Cleaned text with the model's response only.
+    """
+    if debug:
+        return text
+
+    lines = text.split("\n")
+    filtered = []
+    in_banner = True
+
+    for line in lines:
+        # --- phase 1: skip the leading banner block -------------------
+        if in_banner:
+            if _is_banner_line(line):
+                continue
+            if _is_banner_drop_line(line):
+                # Sampling / generate / main: lines belong to the banner
+                # block but are not strictly model output.  Drop them.
+                continue
+            if not line.strip():
+                # Tolerate a few blank lines around the banner boundary.
+                continue
+            # First non-banner, non-empty line: end the banner block and
+            # fall through to process this line as response content.
+            in_banner = False
+
+        # --- phase 2: skip end-of-session markers ----------------------
+        if _is_exit_marker(line):
+            continue
+
+        # --- phase 3: collapse runs of blank lines --------------------
+        if not line.strip():
+            if filtered and filtered[-1].strip():
+                filtered.append(line)
+            continue
+
+        # --- phase 4: strip chat template tokens ----------------------
+        line = _clean_chat_tokens(line)
+        if not line.strip():
+            continue
+
+        filtered.append(line)
+
+    # Strip any trailing blank lines.
+    while filtered and not filtered[-1].strip():
+        filtered.pop()
+
+    return "\n".join(filtered)
+
+
+def _strip_cli_output(raw: str, prompt: str, debug: bool = False) -> str:
     """Strip banner, prompt echo and trailing messages from llama-cli stdout.
 
-    ``llama-cli`` outputs a banner, echoes the ``> <prompt>`` line, and
-    appends an ``Exiting...`` message.  This helper extracts just the
-    generated text.
-    """
-    # Find the prompt echo line: "> <prompt_text>\n"
-    prompt_marker = f"> {prompt}"
-    idx = raw.find(prompt_marker)
-    if idx >= 0:
-        raw = raw[idx + len(prompt_marker):]
+    ``llama-cli`` outputs a banner, echoes the ``> <prompt>`` line
+    (sometimes as ``> > <prompt>`` or ``[user]: <prompt>`` depending on
+    version and chat template), and appends an ``Exiting...`` message.
+    This helper extracts just the generated text.
 
-    # Strip trailing "Exiting..." and any trailing whitespace
-    if "Exiting..." in raw:
-        raw = raw[: raw.index("Exiting...")]
+    Args:
+        raw: Raw stdout captured from ``llama-cli``.
+        prompt: The original prompt that was sent to the model.
+        debug: When True, skip all filtering (banner / echo / tokens).
+
+    Returns:
+        The model's response text.
+    """
+    if debug:
+        return raw.strip()
+
+    # 1. Drop everything up to and including the prompt echo.
+    echo_idx = _find_prompt_echo(raw, prompt)
+    if echo_idx >= 0:
+        # Find end of the echo line so we don't drag a trailing newline
+        # off the start of the response.
+        nl_idx = raw.find("\n", echo_idx)
+        if nl_idx >= 0:
+            raw = raw[nl_idx + 1 :]
+        else:
+            raw = ""
+
+    # 2. Run the rest through the generic noise filter to remove chat
+    #    template tokens and any trailing banner-style lines that may
+    #    have slipped past the prompt-echo match.
+    raw = _strip_llama_cpp_noise(raw, debug=debug)
+
     return raw.strip()
 
 
@@ -287,6 +470,7 @@ def run_inference(
     n_threads: int = -1,
     ctx_size: int = 0,
     stop: Optional[List[str]] = None,
+    debug: bool = False,
 ) -> str:
     """Run text generation with ``llama-cli`` and return the output.
 
@@ -301,9 +485,12 @@ def run_inference(
         n_threads: CPU thread count (-1 = auto).
         ctx_size: Context window size in tokens (0 = model default).
         stop: Optional list of stop strings.
+        debug: When True, skip output filtering and return the raw
+            ``llama-cli`` stdout (banner, prompt echo, ``Exiting...``
+            and all).  Useful for diagnosing model loading issues.
 
     Returns:
-        The generated text (response portion only).
+        The generated text (response portion only, unless ``debug`` is True).
 
     Raises:
         RuntimeError: If the binary is not found or the subprocess fails.
@@ -325,7 +512,108 @@ def run_inference(
     if result.returncode != 0:
         _raise_cli_error("llama-cli", result)
 
-    return _strip_spinner(_strip_cli_output(result.stdout, prompt))
+    cleaned = _strip_cli_output(result.stdout, prompt, debug=debug)
+    return cleaned if debug else _strip_spinner(cleaned)
+
+
+def _strip_prompt_echo_from_line(line: str, prompt: str) -> str:
+    """Remove a prompt echo from one stdout line without dropping a reply."""
+    echo_idx = _find_prompt_echo(line, prompt)
+    if echo_idx < 0:
+        return line
+    return line[:echo_idx] + line[echo_idx + len(prompt):]
+
+
+def _iter_stdout_chunks(stream: Any) -> Iterator[str]:
+    """Yield stdout as soon as one text character is available."""
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _needs_complete_stream_line(fragment: str, prompt: str) -> bool:
+    """Return whether a prefix must stay buffered for clean-mode filtering."""
+    stripped = fragment.lstrip()
+    if not stripped:
+        return True
+    candidates = (
+        *_BANNER_MARKERS,
+        *_BANNER_DROP_PREFIXES,
+        "exiting...",
+        "cleaning up",
+        "exit code:",
+        *_PROMPT_ECHO_PREFIXES,
+        "<|im_start|>",
+        "<|im_end|>",
+        "[Start thinking]",
+        "[/End]",
+        prompt,
+    )
+    lowered = stripped.lower()
+    return any(
+        candidate
+        and (
+            candidate.startswith(stripped)
+            or stripped.startswith(candidate)
+            or candidate.lower().startswith(lowered)
+            or lowered.startswith(candidate.lower())
+        )
+        for candidate in candidates
+    )
+
+
+def _clean_llama_cpp_stream(stdout: Any, prompt: str) -> Iterator[str]:
+    """Clean llama.cpp stdout without withholding generated partial content."""
+    in_banner = True
+    buffer = ""
+    passthrough = False
+    for chunk in _iter_stdout_chunks(stdout):
+        if passthrough:
+            # Keep only a possible control-token prefix buffered. Generated
+            # text continues immediately, including before its newline.
+            if chunk in "<[":
+                buffer = chunk
+                passthrough = False
+                continue
+            yield chunk
+            if chunk == "\n":
+                passthrough = False
+            continue
+
+        buffer += chunk
+        if chunk != "\n":
+            if not _needs_complete_stream_line(buffer, prompt):
+                if in_banner:
+                    in_banner = False
+                cleaned = _strip_spinner(
+                    _clean_chat_tokens(_strip_prompt_echo_from_line(buffer, prompt))
+                )
+                if cleaned:
+                    yield cleaned
+                    buffer = ""
+                    passthrough = True
+            continue
+
+        line = buffer
+        buffer = ""
+        if in_banner:
+            if _is_banner_line(line) or _is_banner_drop_line(line) or not line.strip():
+                continue
+            in_banner = False
+        if _is_exit_marker(line):
+            continue
+        cleaned = _strip_spinner(
+            _clean_chat_tokens(_strip_prompt_echo_from_line(line, prompt))
+        )
+        if cleaned:
+            yield cleaned
+
+    if buffer and not in_banner and not _is_exit_marker(buffer):
+        cleaned = _strip_spinner(_clean_chat_tokens(_strip_prompt_echo_from_line(buffer, prompt)))
+        if cleaned:
+            yield cleaned
 
 
 def run_inference_stream(
@@ -339,48 +627,28 @@ def run_inference_stream(
     n_threads: int = -1,
     ctx_size: int = 0,
     stop: Optional[List[str]] = None,
+    debug: bool = False,
 ) -> Iterator[str]:
-    """Run text generation with streaming output.
+    """Run generation while exposing partial stdout before a newline.
 
-    Yields chunks of generated text as they arrive from ``llama-cli``.
-    Accepts the same arguments as :func:`run_inference`.
+    Normal mode filters llama.cpp UI/prompt/control tokens. Debug mode is a raw
+    stream and yields every stdout character unchanged.
     """
     binary = require_binary("llama-cli")
-
     args = _build_cli_args(
-        binary, model_path, prompt,
-        temperature=temperature, top_p=top_p, top_k=top_k,
-        max_tokens=max_tokens,
-        n_gpu_layers=n_gpu_layers, n_threads=n_threads, ctx_size=ctx_size,
-        stop=stop,
+        binary, model_path, prompt, temperature=temperature, top_p=top_p,
+        top_k=top_k, max_tokens=max_tokens, n_gpu_layers=n_gpu_layers,
+        n_threads=n_threads, ctx_size=ctx_size, stop=stop,
     )
-
-    with subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    ) as proc:
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
         assert proc.stdout is not None
         assert proc.stderr is not None
-
-        # Skip lines until we find the prompt echo
-        prompt_marker = f"> {prompt}"
-        for line in iter(proc.stdout.readline, ""):
-            if prompt_marker in line:
-                break
-
-        # Now yield the actual response lines, stopping at "Exiting..."
-        for line in iter(proc.stdout.readline, ""):
-            if "Exiting..." in line:
-                break
-            if line:
-                yield _strip_spinner(line)
-
+        chunks = _iter_stdout_chunks(proc.stdout) if debug else _clean_llama_cpp_stream(proc.stdout, prompt)
+        yield from chunks
         proc.wait()
         if proc.returncode != 0:
             stderr = proc.stderr.read()
-            raise RuntimeError(
-                f"llama-cli stream failed (exit {proc.returncode}): "
-                f"{stderr.strip()}"
-            )
+            raise RuntimeError(f"llama-cli stream failed (exit {proc.returncode}): {stderr.strip()}")
 
 
 # ---------------------------------------------------------------------------
@@ -769,15 +1037,21 @@ def format_chat_messages(
     A missing or unreadable ``chat_template_path`` file is not an
     error; the function simply falls through to the next option.
     """
-    # 1. Explicit chat template file override
+    # 1. Explicit file override or inline template.  A readable path retains
+    # legacy file behavior; any other non-empty value is treated literally as
+    # an inline profile/template string rather than a filesystem path.
     if chat_template_path is not None:
+        template_path = Path(chat_template_path)
         try:
-            with open(chat_template_path, "r", encoding="utf-8") as _f:
-                _explicit_template = _f.read()
+            if template_path.is_file():
+                _explicit_template = template_path.read_text(encoding="utf-8")
+            elif "{{" in chat_template_path or "<|" in chat_template_path or "\n" in chat_template_path:
+                _explicit_template = chat_template_path
+            else:
+                _explicit_template = ""
             if _explicit_template.strip():
                 return _render_chat_template(_explicit_template, messages)
         except (OSError, UnicodeDecodeError):
-            # File missing / unreadable -> fall through to GGUF / fallback
             pass
 
     # 2. Template baked into the GGUF model file
@@ -866,6 +1140,8 @@ class REPLSession:
         n_threads: int = -1,
         ctx_size: int = 0,
         max_history: int = DEFAULT_MAX_HISTORY,
+        stop: Optional[List[str]] = None,
+        debug: bool = False,
     ) -> None:
         self.model_path = model_path
         self.temperature = temperature
@@ -876,6 +1152,8 @@ class REPLSession:
         self.n_threads = n_threads
         self.ctx_size = ctx_size
         self.max_history = max(0, int(max_history))
+        self.stop = list(stop or [])
+        self.debug = debug
         self.history: List[Dict[str, str]] = []
         if initial_system:
             self.history.append({"role": "system", "content": initial_system})
@@ -934,6 +1212,8 @@ class REPLSession:
                 n_gpu_layers=self.n_gpu_layers,
                 n_threads=self.n_threads,
                 ctx_size=self.ctx_size,
+                stop=self.stop,
+                debug=self.debug,
             )
         else:
             stream_iter = _simulated_stream(prompt)

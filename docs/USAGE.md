@@ -264,7 +264,7 @@ Options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--host` | `127.0.0.1` | Bind address |
-| `--port` | `8080` | Port number |
+| `--port` | `10434` | Port number |
 | `--api-key` | `""` | API key for request authentication |
 
 Examples:
@@ -274,7 +274,7 @@ Examples:
 ethllama serve
 
 # Network-accessible server with API key
-ethllama serve --host 0.0.0.0 --port 8080 --api-key "sk-ethicallama-1234"
+ethllama serve --host 0.0.0.0 --port 10434 --api-key "YOUR_API_KEY"
 ```
 
 #### `config` -- Manage configuration
@@ -456,7 +456,7 @@ gpu:
 api:
   enabled: false           # Enable the API server on startup
   host: 127.0.0.1          # Bind address
-  port: 8080               # Port number
+  port: 10434               # Port number
   api_key: ""              # API key for auth (empty = no auth)
 
 # Telemetry
@@ -573,12 +573,135 @@ ethllama run stories15M.bin
 ````
 
 
+## Model profiles
+
+A **profile** is a reusable preset of inference parameters (system
+prompt, temperature, chat template, stop sequences, …) bound to a
+model by name.  Profiles are the ethicallama equivalent of
+[Ollama's Modelfile](https://github.com/ollama/ollama/blob/main/docs/modelfile.md),
+but they do **not** copy the underlying GGUF file: the model is
+referenced by index name or absolute path, and the parameters are
+applied at runtime.  Switching between "Python coding" and "creative
+writing" personas is just a flag change, no extra gigabytes on disk.
+
+### Where profiles live
+
+Profiles are stored as YAML files in `~/.ethllama/profiles/<name>.yaml`.
+The directory is created on demand when you save your first profile.
+
+### Creating a profile
+
+```bash
+ethllama profile create chat-python \
+  --model Qwen3.5-0.8B-UD-IQ2_XXS \
+  --temperature 0.3 \
+  --top-p 0.9 \
+  --top-k 30 \
+  --max-tokens 2048 \
+  --n-gpu-layers -1 \
+  --ctx-size 4096 \
+  --system-prompt "You are an expert Python developer. Use type hints." \
+  --description "Default profile for Python coding help"
+```
+
+The `--model` value is either an indexed model stem (looked up in
+`~/.ethllama/index.json`) or an absolute path to a GGUF file.  All
+other parameters are optional.
+
+### YAML format
+
+The same file format is produced by `profile show` and consumed by
+`profile run`, so you can also edit it directly with your favorite
+editor (or `ethllama profile edit <name>`, which opens it in `$EDITOR`):
+
+```yaml
+name: chat-python
+description: Default profile for Python coding help
+model: Qwen3.5-0.8B-UD-IQ2_XXS   # index stem OR absolute path
+parameters:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 2048
+  n_gpu_layers: -1
+  ctx_size: 4096
+system_prompt: |
+  You are an expert Python developer. Always explain your code.
+  Use type hints. Prefer standard library. Keep answers concise.
+template: |
+  <|im_start|>system
+  {{ .System }}<|im_end|>
+  <|im_start|>user
+  {{ .Prompt }}<|im_end|>
+  <|im_start|>assistant
+  {{ .Response }}<|im_end|>
+stop:
+  - "<|im_end|>"
+  - "<|im_start|>"
+```
+
+Recognised `parameters` keys mirror the `ethllama run` flags:
+`temperature`, `top_p`, `top_k`, `max_tokens`, `n_gpu_layers`,
+`ctx_size`, `threads`, `gpu_backend`. `template` is inline unless it names an existing readable template file. Stop sequences and token limits are forwarded to native and supported custom engines. Unknown keys are preserved on
+round-trip but ignored by the CLI.
+
+### Running with a profile
+
+Two ways:
+
+```bash
+# Direct:  `ethllama run <model> --profile <name>`
+ethllama run Qwen3.5-0.8B-UD-IQ2_XXS -p "How do I cache a function in Python?" --profile chat-python
+
+# Profile-driven:  `ethllama profile run <name> --prompt ...`
+# (the model is taken from the profile itself)
+ethllama profile run chat-python -p "How do I cache a function in Python?"
+```
+
+Precedence is **explicit CLI option > profile > per-model defaults > application defaults**. An explicitly supplied default-valued option still wins. The profile's parameters act as **fallbacks**: any explicit CLI flag
+you pass on the command line wins.  So `ethllama run <model>
+--profile chat-python --temperature 0.7` uses `0.7` for the
+temperature but everything else from the profile.
+
+The same `--profile` flag works for `ethllama serve` to pre-apply the
+profile's settings to the pre-loaded model:
+
+```bash
+ethllama serve --profile chat-python --port 10434
+```
+
+### Other profile commands
+
+```bash
+ethllama profile list                # list all configured profiles
+ethllama profile show <name>         # show the YAML (or --json)
+ethllama profile edit <name>         # open in $EDITOR
+ethllama profile delete <name>       # remove (prompts for confirmation)
+```
+
+Use `ethllama profile list --json` for machine-readable output
+suitable for scripting.
+
+### Comparison to Ollama's Modelfile
+
+| Concern              | Ollama Modelfile               | ethicallama profile            |
+|----------------------|--------------------------------|--------------------------------|
+| Storage              | Separate copy of GGUF + Modelfile | One YAML referencing the model |
+| Disk overhead        | 1× GGUF per Modelfile          | None (the GGUF is shared)      |
+| Storage format       | Plain-text DSL                 | YAML                           |
+| System prompt        | `SYSTEM`                       | `system_prompt`                |
+| Chat template        | `TEMPLATE`                     | `template` (Jinja2 inline)     |
+| Parameters           | `PARAMETER <key> <value>`      | `parameters:` mapping          |
+| Stop sequences       | `PARAMETER stop <seq>`         | `stop:` list                   |
+| Edit in $EDITOR      | `ollama edit <model>`          | `ethllama profile edit <name>`  |
+
+
 ## API Usage
 
 ### Starting the Server
 
 ```bash
-ethllama serve --host 127.0.0.1 --port 8080 --api-key "sk-ethicallama-1234"
+ethllama serve --host 127.0.0.1 --port 10434 --api-key "YOUR_API_KEY"
 ```
 
 ### Endpoints
@@ -588,9 +711,9 @@ ethllama serve --host 127.0.0.1 --port 8080 --api-key "sk-ethicallama-1234"
 OpenAI-compatible chat completions endpoint.
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:10434/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-ethicallama-1234" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "model": "llama-model",
     "messages": [
@@ -606,9 +729,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 Simple text completions endpoint.
 
 ```bash
-curl -X POST http://localhost:8080/v1/completions \
+curl -X POST http://localhost:10434/v1/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-ethicallama-1234" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "model": "llama-model",
     "prompt": "Once upon a time",
@@ -622,8 +745,8 @@ curl -X POST http://localhost:8080/v1/completions \
 List available models.
 
 ```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer sk-ethicallama-1234"
+curl http://localhost:10434/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 #### GET /health
@@ -631,7 +754,7 @@ curl http://localhost:8080/v1/models \
 Health check endpoint.
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:10434/health
 ```
 
 #### `transcribe` -- Speech-to-text (whisper.cpp)
@@ -776,6 +899,13 @@ model_extensions:
 
 See `docs/examples/` for ready-to-use engine configuration files.
 
+`args_template` is parsed with quote-aware splitting and executed without a
+shell. It also receives `max_tokens`, `stop`, and `stop_sequences`; quote any
+value that may contain whitespace. `output_policy: llama.cpp` enables clean
+output (banner/prompt/control-token removal) in normal mode and raw stdout
+with `--debug`. Arbitrary engines default to `output_policy: raw`; their output
+is intentionally not interpreted, and `--debug` reports that policy.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -810,7 +940,7 @@ See `docs/examples/` for ready-to-use engine configuration files.
 Enable verbose output to get more information:
 
 ```bash
-ethllama --verbose run model.gguf --prompt "Hello"
+ethllama run model.gguf --prompt "Hello" --debug
 ```
 
 ### Log Files
@@ -821,39 +951,35 @@ Logs are written to `~/.ethllama/logs/`. Check these for detailed error informat
 
 ### Quick start with systemd
 
-The fastest way to run ethicallama as a network service:
+Generate a service from the installed CLI rather than copying a repository
+unit. User scope is the default and never invokes `sudo`:
 
-1. **Install the package:**
-   ```bash
-   pip install ethicallama
-   ```
+```bash
+ethllama setup
+systemctl --user status ethllama
+curl http://127.0.0.1:10434/health
+```
 
-2. **Configure the system user:**
-   ```bash
-   sudo useradd --system --shell /usr/sbin/nologin --home /var/lib/ethllama ethllama
-   sudo mkdir -p /var/lib/ethllama /etc/ethllama
-   sudo chown ethllama:ethllama /var/lib/ethllama
-   ```
+The generated unit uses the resolved executable and user configuration; it has
+no embedded API key. It only reports linger status and never enables it.
 
-3. **Install the systemd service:**
-   ```bash
-   sudo cp contrib/systemd/ethllama.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now ethllama
-   ```
+For an explicit PID-1 service, run the command as the intended non-root user:
 
-4. **Test the API:**
-   ```bash
-   curl http://localhost:10434/health
-   ```
+```bash
+ethllama setup --service-mode system
+```
 
-5. **Front it with nginx + Let's Encrypt** (optional):
-   ```bash
-   sudo cp contrib/nginx/ethllama.conf /etc/nginx/sites-available/
-   sudo ln -s /etc/nginx/sites-available/ethllama.conf /etc/nginx/sites-enabled/
-   sudo certbot --nginx -d ethllama.example.com
-   sudo systemctl restart nginx
-   ```
+System mode requires `sudo -n`, rejects root invocation, stores the generated
+configuration root-owned under `/etc/ethllama`, and supplies it via systemd
+credentials. It does not fall back to user mode if a prerequisite fails.
+
+**Front it with nginx + Let's Encrypt** (optional):
+```bash
+sudo cp contrib/nginx/ethllama.conf /etc/nginx/sites-available/
+sudo ln -s /etc/nginx/sites-available/ethllama.conf /etc/nginx/sites-enabled/
+sudo certbot --nginx -d ethllama.example.com
+sudo systemctl restart nginx
+```
 
 ### API extras required
 
