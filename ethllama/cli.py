@@ -771,9 +771,18 @@ def run(
         engine_config = engines[engine]
         click.echo(f"Engine: {engine_config.name} ({engine_config.type})")
 
+        # Custom engines must receive the same effective prompt as the
+        # native path, including profile system/template settings.
+        effective_prompt = _apply_chat_template_and_system(
+            prompt=prompt,
+            model_path=model_path,
+            chat_template_path=effective_chat_template,
+            system_prompt=effective_system_prompt,
+            explicit_prompt=True,
+        )
         cmd = engine_config.render_command(
             model_path=model_path,
-            prompt=prompt,
+            prompt=effective_prompt,
             temperature=effective_temperature,
             top_p=effective_top_p,
             top_k=effective_top_k,
@@ -794,7 +803,7 @@ def run(
                 from .inference import _clean_llama_cpp_stream, _iter_stdout_chunks
 
                 if engine_config.output_policy == "llama.cpp" and not debug:
-                    chunks = _clean_llama_cpp_stream(proc.stdout, prompt)
+                    chunks = _clean_llama_cpp_stream(proc.stdout, effective_prompt)
                 else:
                     chunks = _iter_stdout_chunks(proc.stdout)
                     if debug and engine_config.output_policy == "raw":
@@ -811,7 +820,7 @@ def run(
                 engine_stdout = result.stdout
                 if engine_config.output_policy == "llama.cpp":
                     from .inference import _strip_cli_output
-                    engine_stdout = _strip_cli_output(result.stdout, prompt, debug=debug)
+                    engine_stdout = _strip_cli_output(result.stdout, effective_prompt, debug=debug)
                 elif debug:
                     click.echo("[debug] custom engine output_policy=raw; stdout is unfiltered", err=True)
                 if engine_stdout:
@@ -1271,6 +1280,26 @@ def serve(host: Optional[str], port: Optional[int], api_key: Optional[str], no_a
     effective_ctx_size = int(_resolve_setting("ctx_size", 0, 0, model_config, serve_profile) or 0)
     effective_gpu_backend = _resolve_setting("gpu_backend", gpu_backend, config.get("gpu", {}).get("backend", "cpu"), model_config, serve_profile)
     set_gpu_config(n_gpu_layers=effective_n_gpu_layers, gpu_backend=effective_gpu_backend, n_threads=effective_threads, ctx_size=effective_ctx_size)
+    # Keep the complete profile in API state. Request fields override these
+    # values; without a profile the state remains empty for compatibility.
+    profile_generation_settings: Dict[str, Any] = {}
+    if serve_profile is not None:
+        app_defaults = {"temperature": 0.7, "top_p": 0.9, "top_k": 40, "max_tokens": 2048}
+        effective_stop = (list(serve_profile.stop) if serve_profile.stop else
+                          list(model_config.get("stop", []) or []))
+        profile_generation_settings = {
+            "temperature": _resolve_setting("temperature", 0.7, app_defaults["temperature"], model_config, serve_profile),
+            "top_p": _resolve_setting("top_p", 0.9, app_defaults["top_p"], model_config, serve_profile),
+            "top_k": _resolve_setting("top_k", 40, app_defaults["top_k"], model_config, serve_profile),
+            "max_tokens": _resolve_setting("max_tokens", 2048, app_defaults["max_tokens"], model_config, serve_profile),
+            "stop": effective_stop,
+            "system_prompt": serve_profile.system_prompt or model_config.get("system_prompt", ""),
+            "template": serve_profile.template or model_config.get("chat_template", ""),
+            "n_gpu_layers": effective_n_gpu_layers,
+            "n_threads": effective_threads,
+            "ctx_size": effective_ctx_size,
+            "gpu_backend": effective_gpu_backend,
+        }
     if binary_dir:
         set_binary_config(binary_dir=binary_dir)
     try:
@@ -1283,6 +1312,7 @@ def serve(host: Optional[str], port: Optional[int], api_key: Optional[str], no_a
     try:
         run_server(host=effective_host, port=int(effective_port), api_key=effective_api_key,
                    model_path=preloaded_model, idle_timeout=idle_timeout,
+                   generation_settings=profile_generation_settings,
                    ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
                    ssl_keyfile_password=ssl_keyfile_password, ssl_ca_certs=ssl_ca_certs)
     except KeyboardInterrupt:

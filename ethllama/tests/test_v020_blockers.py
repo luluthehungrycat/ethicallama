@@ -207,3 +207,45 @@ def test_profile_run_reaches_inference_callback_without_missing_profile_argument
     assert result.exit_code == 0, result.output
     assert captured["model_path"] == str(model)
     assert captured["max_tokens"] == 7
+
+
+def test_profile_run_forwards_configured_engine(monkeypatch, tmp_path):
+    """profile run passes an engine parameter through to ``run``."""
+    import types
+    import ethllama.cli as cli
+    from ethllama import profiles as profiles_module
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    monkeypatch.setattr(profiles_module, "PROFILES_DIR", tmp_path / "profiles")
+    Profile(name="engine-profile", model=str(model), parameters={"engine": "custom"}).save()
+
+    captured = {}
+    engine = types.SimpleNamespace(
+        name="custom", type="text", output_policy="raw", supports_streaming=False,
+        render_command=lambda **kwargs: (captured.update(kwargs) or ["custom-engine"]),
+    )
+    monkeypatch.setattr(cli, "load_engines", lambda: {"custom": engine})
+    monkeypatch.setattr(cli, "load_config", lambda: {"gpu": {}})
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(stdout="ok", stderr="", returncode=0))
+
+    result = CliRunner().invoke(main, ["profile", "run", "engine-profile", "--prompt", "hello"])
+    assert result.exit_code == 0, result.output
+    assert captured["prompt"] == "hello"
+
+
+def test_profile_run_without_engine_keeps_engine_unset(monkeypatch, tmp_path):
+    """Profiles without an engine retain the native run path."""
+    from ethllama import profiles as profiles_module
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    monkeypatch.setattr(profiles_module, "PROFILES_DIR", tmp_path / "profiles")
+    Profile(name="native-profile", model=str(model)).save()
+    captured = {}
+    monkeypatch.setattr(inference, "has_inference_engine", lambda: True)
+    monkeypatch.setattr(inference, "run_inference", lambda **kwargs: captured.update(kwargs) or "ok")
+
+    result = CliRunner().invoke(main, ["profile", "run", "native-profile", "--prompt", "hello"])
+    assert result.exit_code == 0, result.output
+    assert captured["prompt"] == "hello"

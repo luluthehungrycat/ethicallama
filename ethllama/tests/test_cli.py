@@ -2972,3 +2972,83 @@ def test_profile_apply_to_kwargs_ignores_none_values_in_profile():
     # Profile value is None, so it doesn't override
     assert out["temperature"] == 0.5
     assert out["top_k"] == 20
+
+
+def test_custom_engine_receives_profile_rendered_prompt(tmp_path, monkeypatch):
+    """Custom engines receive the effective system/template prompt."""
+    from types import SimpleNamespace
+    import ethllama.cli as cli_mod
+    from ethllama.profiles import Profile
+
+    model = tmp_path / "custom-profile.gguf"
+    model.write_bytes(b"GGUF" + b"\x00" * 32)
+    profile = Profile(name="p", model=str(model), system_prompt="Be concise.",
+                      template="SYS:{{ .System }}|USER:{{ .Prompt }}")
+    captured = {}
+    engine = SimpleNamespace(
+        name="fake", type="text", output_policy="raw", supports_streaming=False,
+        render_command=lambda **kwargs: (captured.update(kwargs) or ["fake-engine"]),
+    )
+    monkeypatch.setattr(cli_mod, "load_profile", lambda _name: profile)
+    monkeypatch.setattr(cli_mod, "load_config", lambda: {"gpu": {}})
+    monkeypatch.setattr(cli_mod, "load_engines", lambda: {"fake": engine})
+    monkeypatch.setattr(cli_mod.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="ok", stderr="", returncode=0))
+
+    result = CliRunner().invoke(main, ["run", str(model), "-p", "Hello", "--profile", "p", "--engine", "fake"])
+    assert result.exit_code == 0, result.output
+    assert captured["prompt"] == "SYS:Be concise.|USER:Hello"
+
+
+def test_strip_cli_output_does_not_remove_bare_prompt_with_no_display_prompt():
+    """A generated line equal to the prompt is not assumed to be an echo."""
+    from ethllama.inference import _strip_cli_output
+
+    assert _strip_cli_output("llama_model_loader: blah\nHello there\n", "Hello") == "Hello there"
+
+
+def test_chat_token_filter_preserves_bracketed_generated_text():
+    """Normal bracketed prose survives control-token filtering."""
+    from ethllama.inference import _clean_chat_tokens
+
+    out = _clean_chat_tokens("[Note] [Warning] [Python code]\n[Start thinking] answer [End thinking]")
+    assert "[Note]" in out
+    assert "[Warning]" in out
+    assert "[Python code]" in out
+    assert "[Start thinking]" not in out
+    assert "[End thinking]" not in out
+
+
+def test_serve_profile_passes_effective_generation_settings(monkeypatch, tmp_path):
+    """serve --profile forwards generation and prompt settings to API state."""
+    import ethllama.cli as cli_mod
+    from ethllama.profiles import Profile
+
+    model = tmp_path / "serve-profile.gguf"
+    model.write_bytes(b"GGUF" + b"\x00" * 32)
+    profile = Profile(
+        name="serve-p", model=str(model),
+        parameters={"temperature": 0.2, "top_p": 0.8, "top_k": 12,
+                    "max_tokens": 99, "n_gpu_layers": 3,
+                    "threads": 5, "ctx_size": 2048},
+        system_prompt="Use short answers.", template="T:{{ .Prompt }}",
+        stop=["DONE"],
+    )
+    captured = {}
+    monkeypatch.setattr(cli_mod, "load_profile", lambda _name: profile)
+    monkeypatch.setattr(cli_mod, "load_config", lambda: {"gpu": {}})
+    monkeypatch.setattr(cli_mod, "resolve_model_path", lambda _name: str(model))
+    monkeypatch.setattr("ethllama.api.run_server", lambda **kwargs: (captured.update(kwargs) or (_ for _ in ()).throw(KeyboardInterrupt())))
+
+    result = CliRunner().invoke(main, ["serve", "--profile", "serve-p"])
+    assert result.exit_code == 0, result.output
+    settings = captured["generation_settings"]
+    assert settings["temperature"] == 0.2
+    assert settings["top_p"] == 0.8
+    assert settings["top_k"] == 12
+    assert settings["max_tokens"] == 99
+    assert settings["stop"] == ["DONE"]
+    assert settings["system_prompt"] == "Use short answers."
+    assert settings["template"] == "T:{{ .Prompt }}"
+    assert settings["n_gpu_layers"] == 3
+    assert settings["n_threads"] == 5
+    assert settings["ctx_size"] == 2048

@@ -32,10 +32,10 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
-    top_k: Optional[int] = 40
-    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
 
@@ -43,10 +43,10 @@ class ChatCompletionRequest(BaseModel):
 class CompletionRequest(BaseModel):
     model: str
     prompt: str
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
-    top_k: Optional[int] = 40
-    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
 
@@ -56,6 +56,80 @@ class EmbeddingRequest(BaseModel):
     input: str | List[str]
     encoding_format: Optional[str] = "float"
 
+
+
+
+_DEFAULT_GENERATION_SETTINGS: Dict[str, Any] = {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 2048,
+    "stop": None,
+    "system_prompt": "",
+    "template": "",
+    "n_gpu_layers": None,
+    "n_threads": None,
+    "ctx_size": None,
+}
+
+
+def _generation_setting(request: Any, key: str) -> Any:
+    """Resolve an explicit request field over the active profile setting."""
+    value = getattr(request, key, None)
+    if value is not None:
+        return value
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    profile_value = settings.get(key)
+    if profile_value is not None:
+        return profile_value
+    return _DEFAULT_GENERATION_SETTINGS[key]
+
+
+def _profile_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Apply the profile system message without overriding request messages."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    system_prompt = settings.get("system_prompt")
+    if system_prompt and not any(m.get("role") == "system" for m in messages):
+        return [{"role": "system", "content": system_prompt}, *messages]
+    return messages
+
+
+def _format_profile_messages(messages: List[Dict[str, Any]]) -> str:
+    """Format chat messages, preserving the legacy formatter call shape."""
+    prepared = _profile_messages(messages)
+    template = (getattr(app.state, "generation_settings", {}) or {}).get("template")
+    if template:
+        return format_chat_messages(prepared, chat_template_path=template)
+    return format_chat_messages(prepared)
+
+
+def _format_profile_prompt(prompt: str) -> str:
+    """Render a completion prompt with the active profile chat settings."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    system_prompt = settings.get("system_prompt")
+    template = settings.get("template")
+    if not system_prompt and not template:
+        return prompt
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return format_chat_messages(messages, chat_template_path=template or None)
+
+
+def _inference_kwargs(request: Any, gpu: Dict[str, Any]) -> Dict[str, Any]:
+    """Build inference settings with request > profile > defaults precedence."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    return {
+        "temperature": _generation_setting(request, "temperature"),
+        "top_p": _generation_setting(request, "top_p"),
+        "top_k": _generation_setting(request, "top_k"),
+        "max_tokens": _generation_setting(request, "max_tokens"),
+        "n_gpu_layers": settings.get("n_gpu_layers", gpu["n_gpu_layers"]),
+        "n_threads": settings.get("n_threads", gpu["n_threads"]),
+        "ctx_size": settings.get("ctx_size", 0) or 0,
+        "stop": _generation_setting(request, "stop"),
+    }
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -271,14 +345,8 @@ async def _stream_chat_completion(request: ChatCompletionRequest):
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_messages([m.model_dump() for m in request.messages]),
+        **_inference_kwargs(request, gpu),
     )
     words = response_text.split()
     for i, word in enumerate(words):
@@ -323,14 +391,8 @@ async def _stream_completion(request: CompletionRequest):
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=request.prompt,
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_prompt(request.prompt),
+        **_inference_kwargs(request, gpu),
     )
     words = response_text.split()
     for i, word in enumerate(words):
@@ -465,14 +527,8 @@ async def chat_completions(
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_messages([m.model_dump() for m in request.messages]),
+        **_inference_kwargs(request, gpu),
     )
     return {
         "id": f"cmpl-{int(time.time())}",
@@ -518,14 +574,8 @@ async def completions(
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=request.prompt,
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_prompt(request.prompt),
+        **_inference_kwargs(request, gpu),
     )
     return {
         "id": f"cmpl-{int(time.time())}",
@@ -561,6 +611,7 @@ def run_server(
     api_key: str | None = None,
     model_path: Optional[str] = None,
     idle_timeout: int = 0,
+    generation_settings: Optional[Dict[str, Any]] = None,
     ssl_keyfile: Optional[str] = None,
     ssl_certfile: Optional[str] = None,
     ssl_keyfile_password: Optional[str] = None,
@@ -605,6 +656,7 @@ def run_server(
     app.state.preloaded_model = model_path if model_path else None
     app.state.last_request_time = None
     app.state.idle_timeout = int(idle_timeout or 0)
+    app.state.generation_settings = dict(generation_settings or {})
 
     if app.state.idle_timeout > 0:
         logger.info("Idle timeout set to %ds", app.state.idle_timeout)

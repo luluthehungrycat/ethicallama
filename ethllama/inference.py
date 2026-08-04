@@ -300,7 +300,7 @@ def _is_exit_marker(line: str) -> bool:
 # Patterns llama.cpp uses to echo the prompt back to the user.  Different
 # llama.cpp versions / chat-template configurations emit slightly
 # different prefixes, so we try the common ones in order.
-_PROMPT_ECHO_PREFIXES = ("> ", ">> ", ">>> ", " [user]: ", "[user]: ")
+_PROMPT_ECHO_PREFIXES = ("> > ", ">>> ", ">> ", "> ", " [user]: ", "[user]: ")
 
 
 def _find_prompt_echo(raw: str, prompt: str) -> int:
@@ -311,18 +311,24 @@ def _find_prompt_echo(raw: str, prompt: str) -> int:
     """
     if not prompt:
         return -1
-    # Build a list of patterns in priority order; shorter/looser first so
-    # we don't miss when a longer marker isn't present.
-    patterns = []
-    for prefix in _PROMPT_ECHO_PREFIXES:
-        patterns.append(f"{prefix}{prompt}")
-    patterns.append(prompt)
+    # Only prefixed forms are safe to search for anywhere in stdout.  With
+    # llama.cpp's ``--no-display-prompt`` the bare prompt may legitimately be
+    # generated text, so accept it only when it is an entire output line.
+    patterns = [f"{prefix}{prompt}" for prefix in _PROMPT_ECHO_PREFIXES]
     best = -1
     for pattern in patterns:
         idx = raw.find(pattern)
         if idx >= 0 and (best < 0 or idx < best):
             best = idx
-    return best
+    if best >= 0:
+        return best
+
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        if line.rstrip("\r\n").strip() == prompt:
+            return offset
+        offset += len(line)
+    return -1
 
 
 def _clean_chat_tokens(line: str) -> str:
@@ -338,7 +344,15 @@ def _clean_chat_tokens(line: str) -> str:
     line = re.sub(r"<\|im_start\|>\s*assistant\s*", "", line)
     line = re.sub(r"<\|im_end\|>", "", line)
     line = re.sub(r"<\|[a-z_]+\|>", "", line)
-    line = re.sub(r"\[/?[A-Z][a-z]+(?: [a-z]+)*\]", "", line)
+    # Keep ordinary bracketed prose (for example ``[Note]`` or
+    # ``[Python code]``).  Only remove the known llama.cpp/chat control
+    # markers; arbitrary bracketed generated text is user-visible content.
+    line = re.sub(
+        r"\[(?:Start thinking|End thinking|/End|/Start|/?(?:assistant|user|system|tool))\]",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
     return line
 
 
@@ -549,7 +563,6 @@ def _needs_complete_stream_line(fragment: str, prompt: str) -> bool:
         "<|im_end|>",
         "[Start thinking]",
         "[/End]",
-        prompt,
     )
     lowered = stripped.lower()
     return any(

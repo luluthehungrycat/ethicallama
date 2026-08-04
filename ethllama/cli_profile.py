@@ -65,6 +65,7 @@ _PROFILE_PARAM_MAP: Dict[str, str] = {
     "ctx_size": "ctx_size",
     "threads": "threads",
     "gpu_backend": "gpu_backend",
+    "engine": "engine",
 }
 
 
@@ -453,7 +454,7 @@ def _profile_run_impl(
         "threads": effective.get("threads", 4),
         "n_gpu_layers": effective.get("n_gpu_layers", 0),
         "gpu_backend": effective.get("gpu_backend", "auto"),
-        "engine": None,
+        "engine": effective.get("engine"),
         "output": output,
         "stream": stream,
         "max_tokens": effective.get("max_tokens", 2048),
