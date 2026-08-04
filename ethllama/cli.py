@@ -704,6 +704,7 @@ def run(
     effective_threads = _resolve_setting("threads", threads, app_defaults["threads"], model_cfg, _profile)
     effective_max_tokens = _resolve_setting("max_tokens", max_tokens, app_defaults["max_tokens"], model_cfg, _profile)
     effective_gpu_backend = _resolve_setting("gpu_backend", gpu_backend, app_defaults["gpu_backend"], model_cfg, _profile)
+    effective_engine = _resolve_setting("engine", engine, None, model_cfg, _profile)
     effective_ctx_size = int(_resolve_setting("ctx_size", 0, 0, model_cfg, _profile) or 0)
     effective_system_prompt = system_prompt if _option_was_explicit("system_prompt") else ((_profile.system_prompt if _profile and _profile.system_prompt else None) or model_cfg.get("system_prompt"))
     effective_chat_template = (_profile.template if _profile and _profile.template else model_cfg.get("chat_template"))
@@ -756,19 +757,20 @@ def run(
         )
         sys.exit(1)
 
-    # 4. If --engine specified, use EngineConfig.render_command
-    if engine:
+    # 4. If an engine was specified directly, by profile, or by per-model
+    # defaults, use EngineConfig.render_command.
+    if effective_engine:
         engines = load_engines()
-        if engine not in engines:
+        if effective_engine not in engines:
             available = list(engines.keys())
-            click.echo(f"Error: Engine '{engine}' not found.", err=True)
+            click.echo(f"Error: Engine '{effective_engine}' not found.", err=True)
             if available:
                 click.echo(f"Available engines: {', '.join(available)}", err=True)
             else:
                 click.echo("No engines installed. Check ~/.ethllama/engines/", err=True)
             sys.exit(1)
 
-        engine_config = engines[engine]
+        engine_config = engines[effective_engine]
         click.echo(f"Engine: {engine_config.name} ({engine_config.type})")
 
         # Custom engines must receive the same effective prompt as the

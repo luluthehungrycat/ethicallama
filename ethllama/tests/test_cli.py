@@ -3052,3 +3052,71 @@ def test_serve_profile_passes_effective_generation_settings(monkeypatch, tmp_pat
     assert settings["n_gpu_layers"] == 3
     assert settings["n_threads"] == 5
     assert settings["ctx_size"] == 2048
+
+
+def test_run_with_profile_uses_configured_engine(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """A profile engine is used by `run --profile`, not just `profile run`."""
+    from types import SimpleNamespace
+    from ethllama.profiles import Profile
+    from ethllama import index as index_mod
+    import ethllama.cli as cli_mod
+    import ethllama.inference as inf_mod
+
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF" + b"\x00" * 32)
+    monkeypatch.setattr(index_mod, "INDEX_FILE", tmp_path / "index.json")
+    index_mod.add_to_index(str(model_path))
+    Profile(
+        name="custom-engine-profile",
+        model="model.gguf",
+        parameters={"engine": "fake"},
+    ).save(profiles_dir=tmp_profiles_dir)
+
+    captured = {}
+    engine = SimpleNamespace(
+        name="fake",
+        type="text",
+        output_policy="raw",
+        supports_streaming=False,
+        render_command=lambda **kwargs: (captured.update(kwargs) or ["fake-engine"]),
+    )
+    monkeypatch.setattr(cli_mod, "load_engines", lambda: {"fake": engine})
+    monkeypatch.setattr(inf_mod, "has_inference_engine", lambda: True)
+    monkeypatch.setattr(
+        inf_mod, "run_inference", lambda **kwargs: "native path should not run"
+    )
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="engine output", stderr="", returncode=0),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run", str(model_path), "--prompt", "hello",
+            "--profile", "custom-engine-profile",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["prompt"] == "hello"
+
+
+def test_profile_create_from_yaml_does_not_require_model(
+    tmp_profiles_dir, tmp_path, monkeypatch
+):
+    """`--from-yaml` uses the imported model when no override is supplied."""
+    from ethllama import profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "PROFILES_DIR", tmp_profiles_dir)
+    source = tmp_path / "source.yaml"
+    source.write_text("model: model.gguf\ntemperature: 0.3\n", encoding="utf-8")
+    result = CliRunner().invoke(
+        main,
+        ["profile", "create", "imported", "--from-yaml", str(source)],
+    )
+    assert result.exit_code == 0, result.output
+    imported = profiles_mod.load_profile("imported")
+    assert imported.model == "model.gguf"

@@ -253,7 +253,7 @@ def profile_show(name: str, as_json: bool) -> None:
 
 @profile_group.command(name="create")
 @click.argument("name")
-@click.option("--model", required=True, help="Model path or name from index")
+@click.option("--model", default=None, help="Model path or name from index (required unless --from-yaml is used)")
 @click.option("--system-prompt", default="", help="System prompt")
 @click.option("--description", default="", help="Profile description")
 @click.option("--temperature", type=float, default=None)
@@ -281,7 +281,7 @@ def profile_show(name: str, as_json: bool) -> None:
 )
 def profile_create(
     name: str,
-    model: str,
+    model: Optional[str],
     system_prompt: str,
     description: str,
     temperature: Optional[float],
@@ -309,6 +309,8 @@ def profile_create(
         prof.name = name
         prof.model = model or prof.model
     else:
+        if not model:
+            raise click.UsageError("--model is required unless --from-yaml is provided")
         params: Dict[str, Any] = {}
         for key, value in (
             ("temperature", temperature),
