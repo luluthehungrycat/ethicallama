@@ -4,6 +4,7 @@ import os
 import time
 import json
 import asyncio
+import hmac
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 
 from .config import load_config
 from .index import load_index, resolve_model_path
-from .inference import run_inference, get_embeddings, get_gpu_config, format_chat_messages
+from .inference import run_inference, get_embeddings, format_chat_messages
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,10 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
-    top_k: Optional[int] = 40
-    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
 
@@ -42,10 +43,10 @@ class ChatCompletionRequest(BaseModel):
 class CompletionRequest(BaseModel):
     model: str
     prompt: str
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
-    top_k: Optional[int] = 40
-    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
 
@@ -56,13 +57,87 @@ class EmbeddingRequest(BaseModel):
     encoding_format: Optional[str] = "float"
 
 
+
+
+_DEFAULT_GENERATION_SETTINGS: Dict[str, Any] = {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 2048,
+    "stop": None,
+    "system_prompt": "",
+    "template": "",
+    "n_gpu_layers": None,
+    "n_threads": None,
+    "ctx_size": None,
+}
+
+
+def _generation_setting(request: Any, key: str) -> Any:
+    """Resolve an explicit request field over the active profile setting."""
+    value = getattr(request, key, None)
+    if value is not None:
+        return value
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    profile_value = settings.get(key)
+    if profile_value is not None:
+        return profile_value
+    return _DEFAULT_GENERATION_SETTINGS[key]
+
+
+def _profile_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Apply the profile system message without overriding request messages."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    system_prompt = settings.get("system_prompt")
+    if system_prompt and not any(m.get("role") == "system" for m in messages):
+        return [{"role": "system", "content": system_prompt}, *messages]
+    return messages
+
+
+def _format_profile_messages(messages: List[Dict[str, Any]]) -> str:
+    """Format chat messages, preserving the legacy formatter call shape."""
+    prepared = _profile_messages(messages)
+    template = (getattr(app.state, "generation_settings", {}) or {}).get("template")
+    if template:
+        return format_chat_messages(prepared, chat_template_path=template)
+    return format_chat_messages(prepared)
+
+
+def _format_profile_prompt(prompt: str) -> str:
+    """Render a completion prompt with the active profile chat settings."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    system_prompt = settings.get("system_prompt")
+    template = settings.get("template")
+    if not system_prompt and not template:
+        return prompt
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return format_chat_messages(messages, chat_template_path=template or None)
+
+
+def _inference_kwargs(request: Any, gpu: Dict[str, Any]) -> Dict[str, Any]:
+    """Build inference settings with request > profile > defaults precedence."""
+    settings = getattr(app.state, "generation_settings", {}) or {}
+    return {
+        "temperature": _generation_setting(request, "temperature"),
+        "top_p": _generation_setting(request, "top_p"),
+        "top_k": _generation_setting(request, "top_k"),
+        "max_tokens": _generation_setting(request, "max_tokens"),
+        "n_gpu_layers": settings.get("n_gpu_layers", gpu["n_gpu_layers"]),
+        "n_threads": settings.get("n_threads", gpu["n_threads"]),
+        "ctx_size": settings.get("ctx_size", 0) or 0,
+        "stop": _generation_setting(request, "stop"),
+    }
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="ethicallama API",
-    version="0.1.0",
+    version="0.2.0",
     description="OpenAI-compatible local LLM inference API",
 )
 
@@ -79,13 +154,30 @@ app.add_middleware(
 # Auth dependency
 # ---------------------------------------------------------------------------
 
+def configure_api_key(api_key: str | None = None) -> None:
+    """Read the API key once and retain it in application state.
+
+    Passing ``None`` reads the active configuration.  Passing ``""`` is the
+    explicit, caller-controlled way to disable auth for this process; server
+    startup never writes either value back to disk.
+    """
+    if api_key is None:
+        config = load_config()
+        api = config.get("api", {})
+        api_key = api.get("api_key", "") if isinstance(api, dict) else ""
+    app.state.api_key = str(api_key or "")
+
+
 def verify_api_key(request: Request) -> bool:
-    """Dependency to verify API key if configured."""
-    config = load_config()
-    api_key = config.get("api", {}).get("api_key", "")
+    """Dependency to verify a configured bearer key in constant time."""
+    api_key = getattr(app.state, "api_key", None)
+    if api_key is None:
+        configure_api_key()
+        api_key = app.state.api_key
     if api_key:
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != api_key:
+        supplied = auth[7:] if auth.startswith("Bearer ") else ""
+        if not hmac.compare_digest(supplied, api_key):
             raise HTTPException(
                 status_code=401,
                 detail="Invalid API key",
@@ -253,14 +345,8 @@ async def _stream_chat_completion(request: ChatCompletionRequest):
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_messages([m.model_dump() for m in request.messages]),
+        **_inference_kwargs(request, gpu),
     )
     words = response_text.split()
     for i, word in enumerate(words):
@@ -305,14 +391,8 @@ async def _stream_completion(request: CompletionRequest):
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=request.prompt,
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_prompt(request.prompt),
+        **_inference_kwargs(request, gpu),
     )
     words = response_text.split()
     for i, word in enumerate(words):
@@ -422,7 +502,7 @@ async def embeddings(
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.post("/v1/chat/completions")
@@ -447,14 +527,8 @@ async def chat_completions(
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=format_chat_messages([m.model_dump() for m in request.messages]),
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_messages([m.model_dump() for m in request.messages]),
+        **_inference_kwargs(request, gpu),
     )
     return {
         "id": f"cmpl-{int(time.time())}",
@@ -500,14 +574,8 @@ async def completions(
     response_text = await asyncio.to_thread(
         run_inference,
         model_path=model_path,
-        prompt=request.prompt,
-        temperature=request.temperature or 0.7,
-        top_p=request.top_p or 0.9,
-        top_k=request.top_k or 40,
-        max_tokens=request.max_tokens or 2048,
-        n_gpu_layers=gpu["n_gpu_layers"],
-        n_threads=gpu["n_threads"],
-        stop=request.stop,
+        prompt=_format_profile_prompt(request.prompt),
+        **_inference_kwargs(request, gpu),
     )
     return {
         "id": f"cmpl-{int(time.time())}",
@@ -540,9 +608,10 @@ def create_app() -> FastAPI:
 def run_server(
     host: str = "127.0.0.1",
     port: int = 10434,
-    api_key: str = "",
+    api_key: str | None = None,
     model_path: Optional[str] = None,
     idle_timeout: int = 0,
+    generation_settings: Optional[Dict[str, Any]] = None,
     ssl_keyfile: Optional[str] = None,
     ssl_certfile: Optional[str] = None,
     ssl_keyfile_password: Optional[str] = None,
@@ -578,11 +647,7 @@ def run_server(
     """
     import uvicorn
 
-    if api_key:
-        from .config import save_config
-        config = load_config()
-        config.setdefault("api", {})["api_key"] = api_key
-        save_config(config)
+    configure_api_key(api_key)
 
     # Stash the preloaded model path on the FastAPI app state so route
     # handlers can read it from any thread.  Also initialise the idle
@@ -591,6 +656,7 @@ def run_server(
     app.state.preloaded_model = model_path if model_path else None
     app.state.last_request_time = None
     app.state.idle_timeout = int(idle_timeout or 0)
+    app.state.generation_settings = dict(generation_settings or {})
 
     if app.state.idle_timeout > 0:
         logger.info("Idle timeout set to %ds", app.state.idle_timeout)

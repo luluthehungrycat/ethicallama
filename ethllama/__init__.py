@@ -9,6 +9,14 @@ from .engines import (
 )
 from .config import load_config, save_config, init_config
 from .index import load_index, save_index, add_to_index, remove_from_index, resolve_model_path, find_in_index, list_all_indexed
+from .profiles import (
+    Profile,
+    PROFILES_DIR,
+    list_profiles,
+    load_profile,
+    profile_exists,
+    delete_profile,
+)
 
 __all__ = [
     "main", "load_engines", "get_engine", "EngineConfig",
@@ -16,4 +24,6 @@ __all__ = [
     "load_config", "save_config", "init_config",
     "load_index", "save_index", "add_to_index", "remove_from_index",
     "resolve_model_path", "find_in_index", "list_all_indexed",
+    "Profile", "PROFILES_DIR", "list_profiles", "load_profile",
+    "profile_exists", "delete_profile",
 ]

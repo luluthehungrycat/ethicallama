@@ -30,7 +30,7 @@ ethicallama/
 ├── pyproject.toml              # maturin build config + Python deps (repo root)
 ├── ethllama/                   # Python package
 │   ├── __init__.py             # Re-exports from submodules
-│   ├── cli.py                  # Click CLI (11 subcommands: run, pull, list, index, config, serve, engines, quantize, rm, info, transcribe)
+│   ├── cli.py                  # Click CLI entrypoint (core, setup, profile, management, STT, and TTS commands)
 │   ├── cli_mgmt.py             # Model management subcommands (rm, info)
 │   ├── cli_stt.py              # Speech-to-text subcommand (transcribe)
 │   ├── api.py                  # FastAPI (OpenAI-compatible, opt-in)
@@ -81,7 +81,7 @@ User CLI (click)     FastAPI (uvicorn)
 ### Two Inference Paths
 
 1. **Native Rust path**: `PyLlamaModel` class via PyO3 → calls llama.cpp FFI directly
-2. **Engine binary path**: `EngineConfig.render_command()` → Jinja2 template → shell command to external binary
+2. **Engine binary path**: `EngineConfig.render_command()` → Jinja2 template → quote-aware argv list → external binary
 
 The `run` CLI command tries native first, falls back to engine binary if the model isn't loadable via Rust.
 
@@ -96,7 +96,7 @@ The `run` CLI command tries native first, falls back to engine binary if the mod
 - **`lib.rs`** only does: `mod llama; mod utils;`, PyO3 `#[pymodule]`, and `#[pyclass]` wrappers
 - **`utils.rs`** is for system introspection: GPU detection, file system queries, etc.
 - **Memory safety**: `PyLlamaModel` has a `Drop` impl that calls `llama_free`, and `unsafe impl Send` for PyO3 thread safety
-- **Build**: `cmake` crate is a **build-dependency** (in `[build-dependencies]` in Cargo.toml). The `build.rs` uses the `cmake` crate to build the full llama.cpp library tree, and panics with a clear message if `llama.cpp/` submodule is missing — it does NOT auto-clone during build. Additional build-deps: `cc` for compiling any C shim sources if needed.
+- **Build**: `cmake` and `cc` are build-dependencies for full native inference. With `ethllama-core/llama.cpp/` present, `build.rs` builds and links llama.cpp; without it (including sdist builds), it compiles a stub extension and Python falls back to a subprocess engine.
 
 ### Rust Core (`ethllama-core/src/`) — Current State
 
@@ -119,10 +119,11 @@ The `run` CLI command tries native first, falls back to engine binary if the mod
 
 ### Python Package (`ethllama/`)
 
-- **CLI**: click-based, single `@click.group()` entry point in `cli.py`, 8 subcommands (`run`, `pull`, `list`, `index`, `config`, `serve`, `engines`, `quantize`)
+- **CLI**: click-based, single `@click.group()` entry point in `cli.py`; commands include `run`, `pull`, `list`, `index`, `config`, `serve`, `engines`, `quantize`, `setup`, `profile`, and registered management/modality commands (`rm`, `info`, `transcribe`, `tts`)
 - **Config**: YAML at `~/.ethllama/config.yaml`, loaded via `config.load_config()`, defaults in `DEFAULT_CONFIG` dict
 - **Engine configs**: YAML at `~/.ethllama/engines/*.yaml`, parsed by `EngineConfig` class with Jinja2 templating
 - **Model index**: JSON at `~/.ethllama/index.json`, manages symlinks/hardlinks for storage efficiency
+- **Profiles**: YAML at `~/.ethllama/profiles/<name>.yaml` replaces Ollama Modelfiles without duplicating GGUFs. Profiles propagate parameters, inline templates, stop sequences, and token limits through `profile run`, `run --profile`, and `serve --profile`.
 - **API**: FastAPI is **opt-in only** (extra dependency group `ethllama[api]`). Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`
 - **Pulling**: HuggingFace Hub (`ethllama[pull]`) and Ollama registry (built-in, `requests`-based, no auth needed for public models). Ollama's `application/vnd.ollama.image.model` blob **IS a complete GGUF file** — no conversion needed.
 - **Conversion**: torch+transformers is optional (`ethllama[convert]`)
@@ -155,6 +156,11 @@ model_extensions:          # Supported file extensions (optional)
   - .gguf
 ```
 
+### Output and Custom Engine Policy
+
+- Native output filters banners, prompt echoes, control/chat-template tokens, and exit noise by default; `--debug` deliberately emits raw native or engine output.
+- Custom engine templates render to a quote-aware argv list, not directly printable output. Engine stdout follows its configured `output_policy`: use `llama.cpp` for the same filtering, or explicit `raw` for unfiltered output (the default for arbitrary engines).
+
 ---
 
 ## Constraints & Decisions
@@ -169,11 +175,10 @@ model_extensions:          # Supported file extensions (optional)
 
 ### Build Dependencies
 
-- `llama.cpp` is a **git submodule** at `ethllama-core/llama.cpp/`
-- Must run `git submodule update --init --recursive` before building
-- Build script (`build.rs`) uses `cmake` crate to build the full llama.cpp library tree
-- Use `cargo build --release -p ethllama-core` for the Rust crate
-- Use `maturin develop` or `pip install -e .` for the Python package
+- `llama.cpp` is a **git submodule** at `ethllama-core/llama.cpp/`; full native llama.cpp inference requires it.
+- For a native build, run `git submodule update --init --recursive` before building; `build.rs` then uses `cmake` to build the full llama.cpp library tree.
+- Without the submodule (including sdist builds), `build.rs` builds a stub extension and Python falls back to the subprocess inference path.
+- Use `cargo build --release -p ethllama-core` for the Rust crate, or `maturin develop` / `pip install -e .` for the Python package; each produces native or stub behavior according to submodule availability.
 
 ### Development Setup with `uv`
 
@@ -223,6 +228,18 @@ The `ethllama quantize <model>` command:
 - Accepts `--type` (11 quantization types, default `q4_k_m`) and `--binary` (auto-detected from llama.cpp build dirs or PATH via `shutil.which()`)
 - Resolves model from index, auto-generates output path (`<model>-<type>.gguf`)
 - Runs `llama-quantize` via subprocess with progress logging
+
+### Service Setup and Configuration
+
+- `ethllama setup` generates systemd units in Python; static files under
+  `contrib/systemd/` are documentation-only and must not be copied as units.
+- User scope is the default, sudo-free, and uses `~/.ethllama/config.yaml`; explicit system
+  scope requires non-root invocation plus passwordless `sudo -n`, and passes root-owned
+  `/etc/ethllama/config.yaml` with `LoadCredential`.
+- `ETHLLAMA_CONFIG` is evaluated dynamically and must be absolute. A missing,
+  unreadable, or malformed explicit override is a fatal configuration error.
+- API keys are loaded once into `FastAPI.app.state`, compared with
+  `hmac.compare_digest`, and server startup never persists them.
 
 ### Embeddings Endpoint
 

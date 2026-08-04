@@ -477,3 +477,36 @@ def test_last_request_time_updated_on_chat_completion(
         f"last_request_time={last} outside [{before}, {after}]"
     )
 
+
+
+def test_profile_generation_settings_merge_into_api_requests(test_client, indexed_model, monkeypatch):
+    """Profile state supplies omitted fields while request values override it."""
+    filename, _ = indexed_model
+    captured = []
+
+    def fake_run(**kwargs):
+        captured.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(api, "run_inference", fake_run)
+    monkeypatch.setattr(api.app.state, "generation_settings", {
+        "temperature": 0.2, "top_p": 0.8, "top_k": 12, "max_tokens": 99,
+        "stop": ["DONE"], "system_prompt": "Be brief.",
+        "template": "SYS:{{ .System }}|USER:{{ .Prompt }}",
+        "n_gpu_layers": 3, "n_threads": 5, "ctx_size": 2048,
+    }, raising=False)
+
+    response = test_client.post("/v1/completions", json={
+        "model": filename, "prompt": "Hi", "temperature": 0.9,
+    })
+    assert response.status_code == 200
+    kwargs = captured[-1]
+    assert kwargs["temperature"] == 0.9
+    assert kwargs["top_p"] == 0.8
+    assert kwargs["top_k"] == 12
+    assert kwargs["max_tokens"] == 99
+    assert kwargs["stop"] == ["DONE"]
+    assert "Be brief." in kwargs["prompt"] and "Hi" in kwargs["prompt"]
+    assert kwargs["n_gpu_layers"] == 3
+    assert kwargs["n_threads"] == 5
+    assert kwargs["ctx_size"] == 2048

@@ -123,7 +123,7 @@ ethllama run ~/models/qwen2.5-7b-q4_k_m.gguf --prompt "What is the capital of Fr
 ethllama run ~/models/model.gguf --gpu cuda --gpu-layers 32
 
 # Enable the HTTP API
-ethllama serve --host 127.0.0.1 --port 8080
+ethllama serve --host 127.0.0.1 --port 10434
 
 # List all indexed models
 ethllama index list
@@ -197,13 +197,13 @@ Options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--host` | `127.0.0.1` | Bind address |
-| `--port` | `8080` | Port number |
+| `--port` | `10434` | Port number |
 | `--api-key` | `""` | API key for authentication |
 
 Example:
 
 ```bash
-ethllama serve --host 0.0.0.0 --port 8080 --api-key "my-secret-key"
+ethllama serve --host 0.0.0.0 --port 10434 --api-key "YOUR_API_KEY"
 ```
 
 ### Configuration
@@ -217,7 +217,7 @@ gpu:
 api:
   enabled: false
   host: 127.0.0.1
-  port: 8080
+  port: 10434
   api_key: ""
 telemetry:
   enabled: false
